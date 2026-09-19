@@ -3,7 +3,10 @@
 #include "board_a_log_schedule.h"
 #include "board_a_slave.h"
 #include "config.h"
+#include "config_store.h"
 #include "debug_uart.h"
+#include "delay.h"
+#include "eeprom_config.h"
 #include "stm32f4xx.h"
 
 #define BOARD_A_RS485_BAUD 9600U
@@ -46,6 +49,32 @@ static void debug_write_u32(uint32_t value)
     index--;
     debug_uart_putc(buffer[index]);
   }
+}
+
+static void eeprom_diag_init(void)
+{
+  config_store_t store;
+  config_store_metadata_t metadata;
+  uint8_t payload[CONFIG_STORE_PAYLOAD_MAX_BYTES];
+  config_store_status_t init_status;
+  config_store_status_t load_status;
+
+  delay_init(168U);
+  init_status = eeprom_config_store_init(&store);
+  debug_uart_puts("[board-a] eeprom init=");
+  debug_write_u32((uint32_t)init_status);
+
+  if (init_status == CONFIG_STORE_OK) {
+    load_status = config_store_load(&store, payload, sizeof(payload), &metadata);
+    debug_uart_puts(" load=");
+    debug_write_u32((uint32_t)load_status);
+    debug_uart_puts(" slot=");
+    debug_write_u32(metadata.selected_slot);
+    debug_uart_puts(" seq=");
+    debug_write_u32(metadata.sequence);
+  }
+
+  debug_uart_puts("\r\n");
 }
 
 static void timer_init(void)
@@ -174,6 +203,7 @@ int main(void)
   debug_uart_puts("\r\n[board-a] Modbus RTU slave\r\n");
   debug_uart_puts("[board-a] addr=1 uart=USART2 PA2/PA3 PG8 9600 8E1\r\n");
   debug_uart_puts("[board-a] debug=USART1 PA9/PA10 115200 8N1\r\n");
+  eeprom_diag_init();
 
   board_a_log_schedule_init(&log_schedule, 5000000U, monotonic_now_us());
 
