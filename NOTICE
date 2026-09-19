@@ -1,0 +1,16 @@
+STM32F407-WaterQualityMonitor
+Copyright 2026 kusadact <kspz2@hotmail.com>
+
+This product includes software developed by third parties:
+
+- STM32F4xx Standard Peripheral Library
+  Copyright (c) 2014 STMicroelectronics
+  Licensed under MCD-ST Liberty SW License Agreement V2.
+
+- CMSIS Core (Cortex-M4 core support files)
+  Copyright (c) 2009-2013 ARM Limited
+  Licensed under the Apache License, Version 2.0.
+
+- ALIENTEK Explorer STM32F4 board support package (BSP)
+  Copyright (c) ALIENTEK (Guangzhou Xingyi Electronic Technology Co., Ltd.)
+  All rights reserved; provided for use with ALIENTEK development boards.

@@ -1,0 +1,64 @@
+# Build output (project root only; firmware/build/ is source and must be tracked)
+/build/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.d
+*.su
+
+# macOS
+.DS_Store
+._*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local config and caches
+*.local.h
+__pycache__/
+*.pyc
+
+# Local AI-agent instructions (not committed).
+/AGENTS.md
+
+# Local task log (keep local only).
+/LOG.md
+/log/
+
+# Public tree: no Markdown documentation is published. The root README and
+# everything under docs/ stay local.
+/docs/*
+/README.md
+
+# Local documentation and review material (not committed).
+/docs/DEVELOPMENT.md
+/docs/board_a/
+/docs/board_b/
+/docs/local/
+/docs/review/
+/docs/review-evidence/
+/docs/testing/
+/docs/vendor/
+/docs/experiments/
+/docs/wiring.md
+/docs/README.md
+
+# Local notes under otherwise public test and tool trees.
+/tests/**/*.md
+/tests/README.md
+/tools/README.md
+
+# Local Git hooks.
+/.githooks/
+
+# Renode / Robot Framework test outputs.
+/report.html
+/log.html
+/robot_output.xml
+
+# Local user-acknowledged deferred bugs.
+/KNOWN_BUGS.md
