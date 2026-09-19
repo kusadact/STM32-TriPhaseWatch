@@ -33,8 +33,11 @@ INCLUDES=(
   "-I$APP_DIR"
   "-I$BSP_DIR/CORE"
   "-I$BSP_DIR/USER"
+  "-I$BSP_DIR/SYSTEM/delay"
   "-I$BSP_DIR/SYSTEM/sys"
   "-I$BSP_DIR/FWLIB/STM32F4xx_StdPeriph_Driver/inc"
+  "-I$BSP_DIR/HARDWARE/IIC"
+  "-I$BSP_DIR/HARDWARE/24CXX"
 )
 CPPFLAGS=(-DSTM32F40_41xxx -DUSE_STDPERIPH_DRIVER
           "-include$APP_DIR/gcc_compat.h" "${INCLUDES[@]}")
@@ -64,8 +67,14 @@ sources=(
   "$CORE_DIR/board_a_slave.c"
   "$PLATFORM_DIR/board_a_main.c"
   "$APP_DIR/debug_uart.c"
+  "$APP_DIR/delay_port.c"
   "$APP_DIR/syscalls.c"
+  "$APP_DIR/at24c02_port.c"
+  "$APP_DIR/config_store.c"
+  "$APP_DIR/eeprom_config.c"
   "$BSP_DIR/USER/system_stm32f4xx.c"
+  "$BSP_DIR/HARDWARE/IIC/soft_i2c.c"
+  "$BSP_DIR/HARDWARE/24CXX/at24c02.c"
 )
 
 for source in misc.c stm32f4xx_gpio.c stm32f4xx_rcc.c stm32f4xx_tim.c \
