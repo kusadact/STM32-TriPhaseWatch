@@ -25,7 +25,9 @@ typedef struct {
   uint32_t records_this_run;
   uint32_t sequence;
   uint64_t next_sample_us;
+  uint64_t schedule_deadline_us;
   bool start_pending;
+  bool schedule_armed;
   board_a_model_stats_t stats;
 } board_a_runtime_status_t;
 

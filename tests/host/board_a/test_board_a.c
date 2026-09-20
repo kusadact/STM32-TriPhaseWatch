@@ -269,6 +269,19 @@ static void test_normal_reads(void)
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PERSISTENCE_STATUS) == 0U);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_STORAGE_STATUS) == 0U);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_RTOS_STATUS) == 0U);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PROTOCOL_VERSION) == 2U);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_TIME_STATUS) ==
+        BOARD_A_TIME_STATUS_UNCALIBRATED);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_SCHEDULE_STATE) ==
+        BOARD_A_SCHEDULE_STATE_NONE);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_CURRENT_UTC_SECONDS_HI) ==
+        0xFFFFU);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_CURRENT_UTC_SECONDS_LO) ==
+        0xFFFFU);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_ARMED_START_UTC_SECONDS_HI) ==
+        0xFFFFU);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_ARMED_START_UTC_SECONDS_LO) ==
+        0xFFFFU);
 }
 
 static void test_single_write_and_snapshot(void)
@@ -472,8 +485,12 @@ static void test_length_and_byte_count_errors(void)
                                      0xFFFFU, 2U);
   CHECK(expect_exception(&slave, request, request_length, 0x02U));
 
+  /*
+   * 0x0019 became SCHEDULE_STATE in protocol 2, so the still-undefined
+   * 0x001E..0x001F pair keeps this "range crosses undefined addresses" check.
+   */
   request_length = make_read_request(request, BOARD_A_SLAVE_ADDRESS, 0x04U,
-                                     0x0018U, 2U);
+                                     0x001EU, 2U);
   CHECK(expect_exception(&slave, request, request_length, 0x02U));
 }
 

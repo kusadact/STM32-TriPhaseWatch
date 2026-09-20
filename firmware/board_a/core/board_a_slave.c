@@ -30,7 +30,7 @@ static modbus_result_t slave_read_registers(
 
   sync_communication_stats(slave);
   return board_a_model_read_registers(&slave->model, space, address,
-                                      quantity, values);
+                                      quantity, values, slave->frame_now_us);
 }
 
 static modbus_result_t slave_write_registers(
@@ -42,7 +42,7 @@ static modbus_result_t slave_write_registers(
   board_a_slave_t *slave = (board_a_slave_t *)context;
 
   return board_a_model_write_registers(&slave->model, address, values,
-                                       quantity);
+                                       quantity, slave->frame_now_us);
 }
 
 static const modbus_rtu_ops_t BOARD_A_SLAVE_OPS = {
@@ -53,6 +53,7 @@ static const modbus_rtu_ops_t BOARD_A_SLAVE_OPS = {
 void board_a_slave_init(board_a_slave_t *slave, uint32_t session_id)
 {
   board_a_model_init(&slave->model, session_id);
+  slave->frame_now_us = 0U;
   modbus_rtu_rx_init(&slave->receiver, BOARD_A_T35_US);
   modbus_rtu_server_init(&slave->server, BOARD_A_SLAVE_ADDRESS,
                          &BOARD_A_SLAVE_OPS, slave);

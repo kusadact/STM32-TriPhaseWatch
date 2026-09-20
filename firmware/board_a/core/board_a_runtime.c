@@ -42,7 +42,9 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
   uint32_t version_before;
   uint16_t run_state_before;
   bool start_pending_before;
+  bool schedule_armed_before;
   uint64_t next_sample_before;
+  uint64_t schedule_deadline_before;
 
   if (scheduling_state_changed != NULL) {
     *scheduling_state_changed = false;
@@ -54,6 +56,16 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
   run_state_before = (uint16_t)runtime->slave.model.run_state;
   start_pending_before = runtime->slave.model.start_pending;
   next_sample_before = runtime->slave.model.next_sample_us;
+  schedule_armed_before = runtime->slave.model.time.schedule_armed;
+  schedule_deadline_before = runtime->slave.model.time.schedule_deadline_us;
+  /*
+   * Commands bind the monotonic instant of their own execution, so sample the
+   * 64-bit clock once for this frame instead of reusing the 32-bit framing
+   * timestamp.
+   */
+  if (runtime->ops->now_us != NULL) {
+    runtime->slave.frame_now_us = runtime->ops->now_us(runtime->context);
+  }
   response_length = board_a_slave_poll(&runtime->slave, now_us, response,
                                        response_capacity);
   if (scheduling_state_changed != NULL) {
@@ -61,7 +73,10 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
         (version_before != runtime->slave.model.active_config.version) ||
         (run_state_before != (uint16_t)runtime->slave.model.run_state) ||
         (start_pending_before != runtime->slave.model.start_pending) ||
-        (next_sample_before != runtime->slave.model.next_sample_us);
+        (next_sample_before != runtime->slave.model.next_sample_us) ||
+        (schedule_armed_before != runtime->slave.model.time.schedule_armed) ||
+        (schedule_deadline_before !=
+         runtime->slave.model.time.schedule_deadline_us);
   }
   runtime_unlock(runtime);
   return response_length;
@@ -100,6 +115,8 @@ bool board_a_runtime_copy_status(board_a_runtime_t *runtime,
   status->sequence = runtime->slave.model.snapshot.sequence;
   status->next_sample_us = runtime->slave.model.next_sample_us;
   status->start_pending = runtime->slave.model.start_pending;
+  status->schedule_deadline_us = runtime->slave.model.time.schedule_deadline_us;
+  status->schedule_armed = runtime->slave.model.time.schedule_armed;
   status->stats = runtime->slave.model.stats;
 
   runtime_unlock(runtime);

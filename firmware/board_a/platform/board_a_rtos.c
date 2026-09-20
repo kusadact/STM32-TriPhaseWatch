@@ -695,6 +695,47 @@ static void comm_task(void *argument)
   }
 }
 
+/*
+ * The acquisition task waits for the earliest pending deadline: the next
+ * periodic sample while running, or the latched scheduled-start deadline while
+ * armed. The wait is capped at one second so the TIM2 monotonic service keeps
+ * extending even when no deadline is near.
+ */
+static uint32_t acquisition_wait_ms(const board_a_runtime_status_t *status,
+                                    uint64_t now_us)
+{
+  uint64_t earliest_us = 0U;
+  uint64_t remaining_us;
+  bool have_deadline = false;
+
+  if (status->run_state == BOARD_A_RUN_RUNNING) {
+    if (status->start_pending || (status->next_sample_us == 0U)) {
+      return 0U;
+    }
+    earliest_us = status->next_sample_us;
+    have_deadline = true;
+  }
+
+  if (status->schedule_armed &&
+      (!have_deadline || (status->schedule_deadline_us < earliest_us))) {
+    earliest_us = status->schedule_deadline_us;
+    have_deadline = true;
+  }
+
+  if (!have_deadline) {
+    return BOARD_A_MAX_WAIT_MS;
+  }
+  if (earliest_us <= now_us) {
+    return 0U;
+  }
+
+  remaining_us = earliest_us - now_us;
+  if (remaining_us > (uint64_t)BOARD_A_MAX_WAIT_MS * 1000ULL) {
+    return BOARD_A_MAX_WAIT_MS;
+  }
+  return (uint32_t)((remaining_us + 999ULL) / 1000ULL);
+}
+
 static void acquisition_task(void *argument)
 {
   board_a_runtime_status_t status;
@@ -726,20 +767,8 @@ static void acquisition_task(void *argument)
     board_a_runtime_tick(&g_runtime, now_us);
     if (!board_a_runtime_copy_status(&g_runtime, &status)) {
       wait_ms = BOARD_A_MAX_WAIT_MS;
-    } else if ((status.run_state != BOARD_A_RUN_RUNNING) ||
-               status.start_pending || (status.next_sample_us == 0U)) {
-      wait_ms = (status.run_state == BOARD_A_RUN_RUNNING) ? 0U :
-                BOARD_A_MAX_WAIT_MS;
-    } else if (status.next_sample_us <= now_us) {
-      wait_ms = 0U;
     } else {
-      uint64_t remaining_us = status.next_sample_us - now_us;
-
-      if (remaining_us > (uint64_t)BOARD_A_MAX_WAIT_MS * 1000ULL) {
-        wait_ms = BOARD_A_MAX_WAIT_MS;
-      } else {
-        wait_ms = (uint32_t)((remaining_us + 999ULL) / 1000ULL);
-      }
+      wait_ms = acquisition_wait_ms(&status, now_us);
     }
 
     (void)xTaskNotifyWait(0U, 0xFFFFFFFFUL, &notification_value,
