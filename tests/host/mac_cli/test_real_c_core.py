@@ -207,10 +207,21 @@ class RealCCoreTests(unittest.TestCase):
         self.assertEqual(self.transport.crc(b"123456789"), 0x4B37)
 
     def test_p3b_time_commands_reject_real_protocol_1_without_new_writes(self) -> None:
+        identity = self.service.identity()
+        if identity["protocol_version"] != 1:
+            self.skipTest(
+                "real C core reports protocol "
+                f"{identity['protocol_version']}; protocol 1 rejection is "
+                "covered by the fake-transport test"
+            )
+        first_time_set_write = len(self.transport.writes)
         with self.assertRaises(UnsupportedProtocolError):
             self.service.time_set(123)
-        self.assertEqual(len(self.transport.writes), 1)
-        self.assertEqual(self.transport.writes[0][1], FUNCTION_READ_INPUT)
+        self.assertEqual(len(self.transport.writes), first_time_set_write + 1)
+        self.assertEqual(
+            self.transport.writes[first_time_set_write][1],
+            FUNCTION_READ_INPUT,
+        )
 
     def test_c07_single_dedup_window_and_eviction(self) -> None:
         first = self.service.single(1)
