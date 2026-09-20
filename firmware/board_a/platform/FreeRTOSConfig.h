@@ -7,7 +7,13 @@
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION 1
 #define configUSE_TICKLESS_IDLE 0
 #define configCPU_CLOCK_HZ SystemCoreClock
-#define configSYSTICK_CLOCK_HZ SystemCoreClock
+/*
+ * Do not define configSYSTICK_CLOCK_HZ here. The GCC ARM_CM4F port only
+ * programs the SysTick clock-source bit when that macro is absent; board A
+ * intentionally does not enable SysTick before the scheduler, so leaving the
+ * macro defined would run the tick from the reset-value HCLK/8 source and
+ * make 1000 ticks take 8 seconds instead of 1 second.
+ */
 #define configTICK_RATE_HZ ((TickType_t)1000)
 #define configMAX_PRIORITIES 8
 #define configMINIMAL_STACK_SIZE ((uint16_t)128)
