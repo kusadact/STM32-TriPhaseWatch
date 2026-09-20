@@ -342,8 +342,9 @@ static void test_deadline_predicate_across_ms_wrap(void)
 {
   board_a_monotonic_t clock = {0};
 
-  CHECK(!board_a_deadline_expired(0xFFFFFF00U, 0xFFFFFE00U));
-  CHECK(board_a_deadline_expired(0x00000100U, 0xFFFFFE00U));
+  CHECK(!board_a_deadline_expired(0xFFFFFF00U, 0x00000100U));
+  CHECK(board_a_deadline_expired(0x00000100U, 0x00000100U));
+  CHECK(board_a_deadline_expired(0x00000100U, 0xFFFFFF00U));
   CHECK(board_a_deadline_expired(1000U, 1000U));
   CHECK(!board_a_deadline_expired(999U, 1000U));
 
