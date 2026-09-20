@@ -15,4 +15,10 @@ uint64_t board_a_monotonic_update(board_a_monotonic_t *clock, uint32_t raw_us);
 uint64_t board_a_monotonic_value(const board_a_monotonic_t *clock);
 uint32_t board_a_monotonic_ms(const board_a_monotonic_t *clock);
 
+static inline int board_a_deadline_expired(uint32_t now_ms,
+                                           uint32_t deadline_ms)
+{
+  return (int32_t)(now_ms - deadline_ms) >= 0;
+}
+
 #endif /* BOARD_A_MONOTONIC_H */

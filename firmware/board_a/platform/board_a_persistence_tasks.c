@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "FreeRTOS.h"
+#include "board_a_monotonic.h"
 #include "board_a_storage_engine.h"
 #include "board_a_storage_port.h"
 #include "board_a_rtos.h"
@@ -56,7 +57,7 @@ static uint32_t persistence_now_ms(void)
 
 static int deadline_expired(uint32_t now_ms, uint32_t deadline_ms)
 {
-  return (int32_t)(now_ms - deadline_ms) >= 0;
+  return board_a_deadline_expired(now_ms, deadline_ms);
 }
 
 static uint32_t min_deadline(uint32_t left, uint32_t right)
@@ -397,15 +398,15 @@ void board_a_storage_task(void *argument)
       did_work = storage_run_drain(runtime, &status, &now_ms);
     } else if ((status.storage_state == BOARD_A_STORAGE_INITIALIZING) ||
                (((status.storage_state == BOARD_A_STORAGE_UNAVAILABLE) ||
-                 (status.storage_state == BOARD_A_STORAGE_IO_ERROR)) &&
-                ((int32_t)(now_ms - g_storage_retry_after_ms) >= 0))) {
+                (status.storage_state == BOARD_A_STORAGE_IO_ERROR)) &&
+                board_a_deadline_expired(now_ms, g_storage_retry_after_ms))) {
       if (!storage_probe(runtime, now_ms)) {
         g_storage_retry_after_ms =
             now_ms + BOARD_A_STORAGE_RETRY_PERIOD_MS;
       }
       did_work = 1;
     } else if ((status.queued != 0U) &&
-               ((int32_t)(now_ms - g_storage_retry_after_ms) >= 0)) {
+               board_a_deadline_expired(now_ms, g_storage_retry_after_ms)) {
       did_work = storage_process_one(runtime, now_ms);
       if (did_work) {
         board_a_persistence_status_t after;

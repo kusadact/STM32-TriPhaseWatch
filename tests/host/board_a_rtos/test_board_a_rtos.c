@@ -338,6 +338,24 @@ static void test_monotonic_ms_across_tim2_wrap(void)
   CHECK((int32_t)(1000U - deadline_ms) < 0);
 }
 
+static void test_deadline_predicate_across_ms_wrap(void)
+{
+  board_a_monotonic_t clock = {0};
+
+  CHECK(!board_a_deadline_expired(0xFFFFFF00U, 0xFFFFFE00U));
+  CHECK(board_a_deadline_expired(0x00000100U, 0xFFFFFE00U));
+  CHECK(board_a_deadline_expired(1000U, 1000U));
+  CHECK(!board_a_deadline_expired(999U, 1000U));
+
+  clock.accumulated_us = 4294967295000ULL; /* 4294967295 ms */
+  clock.initialized = true;
+  CHECK(board_a_monotonic_ms(&clock) == 0xFFFFFFFFU);
+  CHECK(board_a_monotonic_update(&clock, 2000000U) == 4294969295000ULL);
+  CHECK(board_a_monotonic_ms(&clock) == 1999U); /* natural u32 ms wrap */
+  CHECK(board_a_deadline_expired(board_a_monotonic_ms(&clock), 1000U));
+  CHECK(!board_a_deadline_expired(board_a_monotonic_ms(&clock), 3000U));
+}
+
 static void test_tx_state_machine(void)
 {
   static const uint8_t data[] = {0x11U, 0x22U, 0x33U};
@@ -1202,6 +1220,7 @@ int main(void)
 {
   test_monotonic_wrap();
   test_monotonic_ms_across_tim2_wrap();
+  test_deadline_predicate_across_ms_wrap();
   test_tx_state_machine();
   test_rx_recovery();
   test_model_commands_and_scheduler();
