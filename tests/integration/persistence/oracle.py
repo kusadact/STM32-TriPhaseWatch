@@ -505,6 +505,52 @@ def validate_record_contract(
     return issues
 
 
+def validate_sampling_timeline(
+    records: Sequence[CsvRecord],
+) -> list[dict[str, Any]]:
+    """Independent per-record sampling-time semantics for one file."""
+
+    issues: list[dict[str, Any]] = []
+
+    def issue(code: str, message: str) -> None:
+        issues.append({"code": code, "message": message})
+
+    previous: CsvRecord | None = None
+    for index, record in enumerate(records):
+        if record.trigger == 2 and record.planned_ms != record.actual_ms:
+            issue(
+                "single_time",
+                (
+                    f"record {index}: single trigger requires planned_ms == "
+                    f"actual_ms, got {record.planned_ms} != {record.actual_ms}"
+                ),
+            )
+        if previous is not None:
+            if record.actual_ms < previous.actual_ms:
+                issue(
+                    "actual_order",
+                    (
+                        f"record {index}: actual_ms={record.actual_ms} is earlier "
+                        f"than the previous actual_ms={previous.actual_ms}"
+                    ),
+                )
+            if record.trigger == 1 and previous.trigger == 1:
+                step = record.planned_ms - previous.actual_ms
+                expected = record.period_s * 1000
+                previous_expected = previous.period_s * 1000
+                if step not in (expected, previous_expected):
+                    issue(
+                        "planned_step",
+                        (
+                            f"record {index}: planned_ms={record.planned_ms} is "
+                            f"{step} ms after the previous actual_ms="
+                            f"{previous.actual_ms}, expected {expected} ms"
+                        ),
+                    )
+        previous = record
+    return issues
+
+
 def _word32(high: int, low: int) -> int:
     return ((high & 0xFFFF) << 16) | (low & 0xFFFF)
 

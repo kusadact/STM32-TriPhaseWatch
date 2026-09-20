@@ -201,8 +201,10 @@ def make_valid_fixture(
     records: list[dict[str, int]] = []
     for offset in range(record_count):
         seq = (seq_start + offset) % (1 << 32)
-        utc_s = BASE_UTC + offset if utc_valid else 0
+        utc_s = BASE_UTC + (offset * period_s) if utc_valid else 0
         file_date = int(oracle.utc_date_text(utc_s)) if utc_valid else 0
+        planned_ms = 1_000_000 + (offset * ((period_s * 1000) + 5))
+        actual_ms = planned_ms + 5
         records.append(
             record_values(
                 seq=seq,
@@ -216,6 +218,8 @@ def make_valid_fixture(
                 utc_s=utc_s,
                 file_id=1,
                 file_date=file_date,
+                planned_ms=planned_ms,
+                actual_ms=actual_ms,
             )
         )
     data = csv_bytes(records)
@@ -282,7 +286,9 @@ def make_valid_fixture(
                 "status": "PASS",
                 "transaction_ids": [index + 1],
             }
-            for index, operation in enumerate(("config", "apply", "start", "stop"))
+            for index, operation in enumerate(
+                ("config", "apply", "time-set", "start", "stop")
+            )
         ],
     )
     write_jsonl(run_dir / "transactions.jsonl", [])
@@ -327,40 +333,44 @@ def make_valid_fixture(
         },
         {"kind": "storage", "value": first_storage},
     ]
-    for index, record in enumerate(records):
+    if utc_valid:
         observations.append(
             {
-                "kind": "snapshot",
+                "kind": "command",
                 "value": {
-                    "session_id": session,
-                    "sequence": record["seq"],
-                    "trigger_code": record["trigger"],
-                    "channel_values": [
-                        record[f"v{channel}"] for channel in range(4)
-                    ],
-                    "channel_qualities": [
-                        record[f"q{channel}"] for channel in range(4)
-                    ],
+                    "requested_utc_seconds": BASE_UTC,
+                    "command": 6,
+                    "result": 1,
                 },
+                "observed_utc": datetime.fromtimestamp(
+                    BASE_UTC, tz=timezone.utc
+                ).isoformat(),
             }
         )
+    for index, record in enumerate(records):
+        snapshot_observation: dict[str, Any] = {
+            "kind": "snapshot",
+            "value": {
+                "session_id": session,
+                "sequence": record["seq"],
+                "trigger_code": record["trigger"],
+                "channel_values": [
+                    record[f"v{channel}"] for channel in range(4)
+                ],
+                "channel_qualities": [
+                    record[f"q{channel}"] for channel in range(4)
+                ],
+            },
+        }
+        if utc_valid:
+            snapshot_observation["observed_utc"] = datetime.fromtimestamp(
+                record["utc_s"], tz=timezone.utc
+            ).isoformat()
+        observations.append(snapshot_observation)
         if index == 0 and include_repeated_poll:
-            observations.append(
-                {
-                    "kind": "snapshot",
-                    "value": {
-                        "session_id": session,
-                        "sequence": record["seq"],
-                        "trigger_code": record["trigger"],
-                        "channel_values": [
-                            record[f"v{channel}"] for channel in range(4)
-                        ],
-                        "channel_qualities": [
-                            record[f"q{channel}"] for channel in range(4)
-                        ],
-                    },
-                }
-            )
+            repeated = dict(snapshot_observation)
+            repeated["value"] = dict(snapshot_observation["value"])
+            observations.append(repeated)
     observations.append({"kind": "storage", "value": final_storage})
     write_jsonl(run_dir / "observations.jsonl", observations)
     write_jsonl(

@@ -38,6 +38,8 @@ EXIT_FAIL = 1
 EXIT_NOT_RUN = 2
 EXIT_INCONCLUSIVE = 3
 
+UTC_OBSERVATION_TOLERANCE_S = 3
+
 
 class VerifyInputError(ValueError):
     pass
@@ -668,6 +670,118 @@ def _verify_records(
     return all_records
 
 
+def _observation_utc_seconds(observation: Mapping[str, Any]) -> int | None:
+    value = observation.get("observed_utc")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def _verify_timeline(
+    report: Report,
+    parsed_files: Sequence[oracle.ParsedCsv],
+    observations: Sequence[Mapping[str, Any]],
+) -> None:
+    timeline_start = len(report.issues)
+    record_count = 0
+    for parsed in parsed_files:
+        record_count += len(parsed.records)
+        for issue in oracle.validate_sampling_timeline(parsed.records):
+            report.add_issue(
+                issue["code"],
+                f"{parsed.relative_path}: {issue['message']}",
+                path=parsed.relative_path,
+            )
+    timeline_issues = report.issues[timeline_start:]
+    report.check(
+        "sampling_timeline",
+        "FAIL" if timeline_issues else "PASS",
+        (
+            f"checked {record_count} record(s) for planned/actual ordering, "
+            "period steps and single semantics"
+        ),
+    )
+
+    utc_start = len(report.issues)
+    observed_by_seq: dict[int, int] = {}
+    for observation in observations:
+        if observation.get("kind") != "snapshot":
+            continue
+        value = observation.get("value")
+        if not isinstance(value, Mapping):
+            continue
+        sequence = value.get("sequence")
+        seconds = _observation_utc_seconds(observation)
+        if isinstance(sequence, int) and seconds is not None:
+            observed_by_seq.setdefault(sequence, seconds)
+
+    has_time_set = any(
+        isinstance(observation.get("value"), Mapping)
+        and "requested_utc_seconds" in observation["value"]
+        for observation in observations
+    )
+
+    checked = 0
+    missing = 0
+    for parsed in parsed_files:
+        for record_index, record in enumerate(parsed.records):
+            if record.utc_valid != 1:
+                continue
+            observed = observed_by_seq.get(record.seq)
+            if observed is None:
+                missing += 1
+                continue
+            checked += 1
+            if abs(observed - record.utc_s) > UTC_OBSERVATION_TOLERANCE_S:
+                report.add_issue(
+                    "utc_host_mapping",
+                    (
+                        f"{parsed.relative_path}:{record_index + 2}: utc_s="
+                        f"{record.utc_s} differs from the host observation "
+                        f"({observed}) by more than "
+                        f"{UTC_OBSERVATION_TOLERANCE_S} s"
+                    ),
+                    path=parsed.relative_path,
+                    record_index=record_index,
+                )
+    if missing != 0:
+        report.add_issue(
+            "utc_mapping_evidence",
+            (
+                f"{missing} UTC-valid record(s) have no matching host snapshot "
+                "observation"
+            ),
+            status="INCONCLUSIVE",
+        )
+    if checked != 0 and not has_time_set:
+        report.add_issue(
+            "utc_anchor_evidence",
+            "UTC-valid records exist but the run has no SET_TIME evidence",
+            status="INCONCLUSIVE",
+        )
+    utc_issues = report.issues[utc_start:]
+    if any(issue.get("status") == "FAIL" for issue in utc_issues):
+        utc_status = "FAIL"
+    elif utc_issues:
+        utc_status = "INCONCLUSIVE"
+    else:
+        utc_status = "PASS"
+    report.check(
+        "utc_mapping",
+        utc_status,
+        (
+            f"cross-checked {checked} UTC-valid record(s) against host "
+            f"observations; {missing} without matching evidence"
+        ),
+    )
+
+
 def _snapshot_identity(
     observation: Mapping[str, Any],
 ) -> tuple[int | None, int | None]:
@@ -959,6 +1073,7 @@ def verify_run(run_dir: Path, files_dir: Path, output_dir: Path) -> Report:
         evidence["observations"],
     )
     records = _verify_records(report, parsed_files, config_versions)
+    _verify_timeline(report, parsed_files, evidence["observations"])
     _verify_observation_cross_checks(
         report,
         evidence["observations"],

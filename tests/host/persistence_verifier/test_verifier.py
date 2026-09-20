@@ -250,6 +250,30 @@ class VerifierTests(unittest.TestCase):
 
             _mutate_records(run_dir, files_dir, mutate)
 
+        def zero_sampling_times(run_dir: Path, files_dir: Path) -> None:
+            def mutate(records: list[dict[str, int]]) -> list[dict[str, int]]:
+                for record in records:
+                    record["planned_ms"] = 0
+                    record["actual_ms"] = 0
+                return records
+
+            _mutate_records(run_dir, files_dir, mutate)
+
+        def utc_shift_same_day(run_dir: Path, files_dir: Path) -> None:
+            def mutate(records: list[dict[str, int]]) -> list[dict[str, int]]:
+                for record in records:
+                    record["utc_s"] += 3600
+                return records
+
+            _mutate_records(run_dir, files_dir, mutate)
+
+        def single_time_mismatch(run_dir: Path, files_dir: Path) -> None:
+            def mutate(records: list[dict[str, int]]) -> list[dict[str, int]]:
+                records[1]["trigger"] = 2
+                return records
+
+            _mutate_records(run_dir, files_dir, mutate)
+
         def utc_contradiction(run_dir: Path, files_dir: Path) -> None:
             def mutate(records: list[dict[str, int]]) -> list[dict[str, int]]:
                 records[1]["utc_valid"] = 0
@@ -399,6 +423,9 @@ class VerifierTests(unittest.TestCase):
                     sync_count_mismatch,
                 ),
                 ("half_run", 1, {"half_run_as_complete"}, half_run),
+                ("zero_sampling_times", 1, {"planned_step"}, zero_sampling_times),
+                ("utc_shift_same_day", 1, {"utc_host_mapping"}, utc_shift_same_day),
+                ("single_time_mismatch", 1, {"single_time"}, single_time_mismatch),
             ]
         )
 
