@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "board_a_persistence.h"
 #include "modbus_rtu.h"
 
 #define BOARD_A_SLAVE_ADDRESS 1U
@@ -107,6 +108,49 @@ enum {
   BOARD_A_INPUT_PERSISTENCE_ERRORS_LO = 0x0077,
   BOARD_A_INPUT_DEVICE_FAULTS_HI = 0x0078,
   BOARD_A_INPUT_DEVICE_FAULTS_LO = 0x0079
+};
+
+enum {
+  BOARD_A_INPUT_CONTRACT_REVISION = 0x0080,
+  BOARD_A_INPUT_SAVE_STATE = 0x0081,
+  BOARD_A_INPUT_SAVE_COMMAND_ID_HI = 0x0082,
+  BOARD_A_INPUT_SAVE_COMMAND_ID_LO = 0x0083,
+  BOARD_A_INPUT_SAVE_CONFIG_VERSION_HI = 0x0084,
+  BOARD_A_INPUT_SAVE_CONFIG_VERSION_LO = 0x0085,
+  BOARD_A_INPUT_SAVE_ERROR = 0x0086,
+  BOARD_A_INPUT_CONFIG_LOAD_STATE = 0x0087,
+  BOARD_A_INPUT_EXTENDED_STORAGE_STATE = 0x0088,
+  BOARD_A_INPUT_EXTENDED_STORAGE_ERROR = 0x0089,
+  BOARD_A_INPUT_STORAGE_QUEUED = 0x008A,
+  BOARD_A_INPUT_STORAGE_HIGH_WATER = 0x008B,
+  BOARD_A_INPUT_STORAGE_GENERATED_HI = 0x008C,
+  BOARD_A_INPUT_STORAGE_GENERATED_LO = 0x008D,
+  BOARD_A_INPUT_STORAGE_SYNCED_HI = 0x008E,
+  BOARD_A_INPUT_STORAGE_SYNCED_LO = 0x008F,
+  BOARD_A_INPUT_STORAGE_DROPPED_EXT_HI = 0x0090,
+  BOARD_A_INPUT_STORAGE_DROPPED_EXT_LO = 0x0091,
+  BOARD_A_INPUT_STORAGE_UNCERTAIN_HI = 0x0092,
+  BOARD_A_INPUT_STORAGE_UNCERTAIN_LO = 0x0093,
+  BOARD_A_INPUT_STORAGE_IN_FLIGHT = 0x0094,
+  BOARD_A_INPUT_DRAIN_STATE = 0x0095,
+  BOARD_A_INPUT_LAST_SYNCED_SEQ_HI = 0x0096,
+  BOARD_A_INPUT_LAST_SYNCED_SEQ_LO = 0x0097,
+  BOARD_A_INPUT_LAST_SYNCED_FILE_HI = 0x0098,
+  BOARD_A_INPUT_LAST_SYNCED_FILE_LO = 0x0099,
+  BOARD_A_INPUT_LAST_SYNCED_DATE_HI = 0x009A,
+  BOARD_A_INPUT_LAST_SYNCED_DATE_LO = 0x009B,
+  BOARD_A_INPUT_EXTENDED_ACTIVE_CONFIG_VERSION_HI = 0x009C,
+  BOARD_A_INPUT_EXTENDED_ACTIVE_CONFIG_VERSION_LO = 0x009D,
+  BOARD_A_INPUT_DRAIN_GENERATION_HI = 0x009E,
+  BOARD_A_INPUT_DRAIN_GENERATION_LO = 0x009F,
+  BOARD_A_INPUT_STORAGE_ERRORS_HI = 0x00A0,
+  BOARD_A_INPUT_STORAGE_ERRORS_LO = 0x00A1,
+  BOARD_A_INPUT_LOAD_SEQUENCE_HI = 0x00A2,
+  BOARD_A_INPUT_LOAD_SEQUENCE_LO = 0x00A3,
+  BOARD_A_INPUT_CAPTURED_PERIOD_HI = 0x00A4,
+  BOARD_A_INPUT_CAPTURED_PERIOD_LO = 0x00A5,
+  BOARD_A_INPUT_CAPTURED_MASK = 0x00A6,
+  BOARD_A_INPUT_CAPTURED_COUNT = 0x00A7
 };
 
 typedef enum {
@@ -247,6 +291,7 @@ typedef struct {
   uint64_t next_sample_us;
   bool start_pending;
   board_a_time_state_t time;
+  board_a_persistence_t persistence;
   board_a_model_stats_t stats;
 } board_a_model_t;
 
@@ -266,5 +311,43 @@ modbus_result_t board_a_model_write_registers(void *context,
                                               uint64_t now_us);
 
 void board_a_model_tick(board_a_model_t *model, uint64_t now_us);
+
+void board_a_model_apply_loaded_config(
+    board_a_model_t *model, const board_a_persisted_config_t *config,
+    uint32_t sequence);
+
+void board_a_model_note_config_load(
+    board_a_model_t *model, board_a_config_load_state_t state,
+    uint32_t sequence);
+
+int board_a_model_claim_save(board_a_model_t *model,
+                             board_a_save_request_t *request);
+
+void board_a_model_complete_save(
+    board_a_model_t *model, int success, board_a_save_error_t error,
+    uint32_t raw_error);
+
+int board_a_model_pop_record(
+    board_a_model_t *model, board_a_record_format_record_t *record);
+
+void board_a_model_requeue_record(
+    board_a_model_t *model,
+    const board_a_record_format_record_t *record);
+
+void board_a_model_complete_record(
+    board_a_model_t *model,
+    const board_a_record_format_record_t *record,
+    board_a_record_complete_result_t result);
+
+void board_a_model_set_storage_state(
+    board_a_model_t *model, board_a_storage_state_t state,
+    board_a_storage_error_t error, uint32_t raw_error);
+
+void board_a_model_note_storage_error(
+    board_a_model_t *model, board_a_storage_error_t error,
+    uint32_t raw_error);
+
+void board_a_model_complete_drain(board_a_model_t *model,
+                                  uint32_t generation, int success);
 
 #endif /* BOARD_A_MODEL_H */

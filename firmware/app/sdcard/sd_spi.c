@@ -46,6 +46,38 @@
 #define SD_ACMD_SEND_OP_COND     41u
 
 static sd_spi_info_t sd_info;
+static sd_spi_now_ms_fn sd_now_ms;
+static void *sd_now_context;
+static uint32_t sd_deadline_ms;
+static uint8_t sd_deadline_enabled;
+
+void sd_spi_set_deadline(sd_spi_now_ms_fn now_ms, void *context,
+                         uint32_t deadline_ms)
+{
+  sd_now_ms = now_ms;
+  sd_now_context = context;
+  sd_deadline_ms = deadline_ms;
+  sd_deadline_enabled = (now_ms != NULL) ? 1u : 0u;
+}
+
+void sd_spi_clear_deadline(void)
+{
+  sd_deadline_enabled = 0u;
+  sd_now_ms = NULL;
+  sd_now_context = NULL;
+  sd_deadline_ms = 0u;
+}
+
+uint8_t sd_spi_deadline_expired(void)
+{
+  uint32_t now;
+
+  if (sd_deadline_enabled == 0u || sd_now_ms == NULL) {
+    return 0u;
+  }
+  now = sd_now_ms(sd_now_context);
+  return ((int32_t)(now - sd_deadline_ms) >= 0) ? 1u : 0u;
+}
 
 /* CRC7 over the first five command bytes (SD physical layer, 7.2.2). */
 static uint8_t sd_crc7(const uint8_t *data, uint8_t len)
@@ -124,6 +156,9 @@ static sd_spi_result_t sd_read_data(uint8_t *buf, uint16_t len)
   uint32_t i;
 
   for (i = 0u; i < SD_SPI_TOKEN_TRIES; i++) {
+    if (sd_spi_deadline_expired() != 0u) {
+      return SD_SPI_ERR_TIMEOUT;
+    }
     token = sd_bus_xfer(SD_SPI_IDLE_BYTE);
     if (token != SD_SPI_IDLE_BYTE) {
       break;
@@ -198,6 +233,9 @@ sd_spi_result_t sd_spi_init(sd_spi_info_t *info)
   uint32_t acmd41_arg;
 
   memset(&sd_info, 0, sizeof(sd_info));
+  if (sd_spi_deadline_expired() != 0u) {
+    return SD_SPI_ERR_TIMEOUT;
+  }
 
   sd_bus_init();
   sd_bus_set_slow(1u);
@@ -232,6 +270,9 @@ sd_spi_result_t sd_spi_init(sd_spi_info_t *info)
 
   acmd41_arg = (sd_info.card_type >= 2u) ? 0x40000000u : 0x00000000u;
   for (i = 0u; i < SD_SPI_ACMD41_TRIES; i++) {
+    if (sd_spi_deadline_expired() != 0u) {
+      return SD_SPI_ERR_TIMEOUT;
+    }
     r1 = sd_cmd_begin(SD_CMD_APP_CMD, 0u);
     sd_cmd_end();
     if ((r1 & 0x80u) != 0u) {
@@ -323,6 +364,9 @@ sd_spi_result_t sd_spi_read_blocks(uint32_t lba, uint8_t *buf, uint32_t count)
     uint32_t lba_now = lba + block;
     sd_spi_result_t result;
 
+    if (sd_spi_deadline_expired() != 0u) {
+      return SD_SPI_ERR_TIMEOUT;
+    }
     if ((lba_now < lba) || ((sd_info.sector_count != 0u) && (lba_now >= sd_info.sector_count))) {
       return SD_SPI_ERR_PARAM;
     }
@@ -363,6 +407,9 @@ sd_spi_result_t sd_spi_write_blocks(uint32_t lba, const uint8_t *buf, uint32_t c
   for (block = 0u; block < count; block++, buf += SD_SPI_BLOCK_SIZE) {
     uint32_t lba_now = lba + block;
 
+    if (sd_spi_deadline_expired() != 0u) {
+      return SD_SPI_ERR_TIMEOUT;
+    }
     if ((lba_now < lba) || ((sd_info.sector_count != 0u) && (lba_now >= sd_info.sector_count))) {
       return SD_SPI_ERR_PARAM;
     }
@@ -391,6 +438,10 @@ sd_spi_result_t sd_spi_write_blocks(uint32_t lba, const uint8_t *buf, uint32_t c
     }
 
     for (i = 0u; i < SD_SPI_WRITE_BUSY_TRIES; i++) {
+      if (sd_spi_deadline_expired() != 0u) {
+        sd_cmd_end();
+        return SD_SPI_ERR_TIMEOUT;
+      }
       if (sd_bus_xfer(SD_SPI_IDLE_BYTE) != 0x00u) {
         break;
       }

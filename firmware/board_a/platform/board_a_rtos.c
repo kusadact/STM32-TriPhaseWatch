@@ -4,14 +4,13 @@
 #include "FreeRTOS.h"
 #include "board_a_log_schedule.h"
 #include "board_a_monotonic.h"
+#include "board_a_persistence_tasks.h"
 #include "board_a_rx_recovery.h"
 #include "board_a_runtime.h"
 #include "board_a_tx.h"
 #include "config.h"
-#include "config_store.h"
 #include "debug_uart.h"
 #include "delay.h"
-#include "eeprom_config.h"
 #include "queue.h"
 #include "semphr.h"
 #include "soft_i2c.h"
@@ -25,6 +24,8 @@
 #define BOARD_A_ACQUISITION_TASK_PRIORITY 2U
 #define BOARD_A_COMM_STACK_WORDS 1024U
 #define BOARD_A_ACQUISITION_STACK_WORDS 512U
+#define BOARD_A_CONFIG_STACK_WORDS 512U
+#define BOARD_A_STORAGE_STACK_WORDS 1024U
 #define BOARD_A_IDLE_STACK_WORDS 128U
 #define BOARD_A_LOG_PERIOD_US 5000000ULL
 #define BOARD_A_MAX_WAIT_MS 1000U
@@ -48,6 +49,8 @@ typedef struct {
   volatile uint32_t task_ready_mask;
   volatile uint32_t comm_stack_min_words;
   volatile uint32_t acquisition_stack_min_words;
+  volatile uint32_t config_stack_min_words;
+  volatile uint32_t storage_stack_min_words;
   volatile uint32_t idle_stack_min_words;
   volatile uint32_t rx_queue_depth_max;
   volatile uint32_t rx_queue_drops;
@@ -88,6 +91,8 @@ static QueueHandle_t g_rx_queue;
 static SemaphoreHandle_t g_model_mutex;
 static TaskHandle_t g_comm_task;
 static TaskHandle_t g_acquisition_task;
+static TaskHandle_t g_config_task;
+static TaskHandle_t g_storage_task;
 
 static StaticQueue_t g_rx_queue_buffer;
 static uint32_t g_rx_queue_storage[
@@ -103,10 +108,16 @@ _Static_assert(sizeof(g_rx_queue_storage) >=
 static StaticSemaphore_t g_model_mutex_buffer;
 static StaticTask_t g_comm_task_buffer;
 static StaticTask_t g_acquisition_task_buffer;
+static StaticTask_t g_config_task_buffer;
+static StaticTask_t g_storage_task_buffer;
 static StaticTask_t g_idle_task_buffer;
 static StackType_t g_comm_stack[BOARD_A_COMM_STACK_WORDS]
     __attribute__((aligned(8)));
 static StackType_t g_acquisition_stack[BOARD_A_ACQUISITION_STACK_WORDS]
+    __attribute__((aligned(8)));
+static StackType_t g_config_stack[BOARD_A_CONFIG_STACK_WORDS]
+    __attribute__((aligned(8)));
+static StackType_t g_storage_stack[BOARD_A_STORAGE_STACK_WORDS]
     __attribute__((aligned(8)));
 static StackType_t g_idle_stack[BOARD_A_IDLE_STACK_WORDS]
     __attribute__((aligned(8)));
@@ -214,32 +225,6 @@ static void debug_write_u32(uint32_t value)
   }
 }
 
-static void eeprom_diag_init(void)
-{
-  config_store_t store;
-  config_store_metadata_t metadata;
-  uint8_t payload[CONFIG_STORE_PAYLOAD_MAX_BYTES];
-  config_store_status_t init_status;
-  config_store_status_t load_status;
-
-  delay_init(168U);
-  init_status = eeprom_config_store_init(&store);
-  debug_uart_puts("[board-a] eeprom init=");
-  debug_write_u32((uint32_t)init_status);
-
-  if (init_status == CONFIG_STORE_OK) {
-    load_status = config_store_load(&store, payload, sizeof(payload), &metadata);
-    debug_uart_puts(" load=");
-    debug_write_u32((uint32_t)load_status);
-    debug_uart_puts(" slot=");
-    debug_write_u32(metadata.selected_slot);
-    debug_uart_puts(" seq=");
-    debug_write_u32(metadata.sequence);
-  }
-
-  debug_uart_puts("\r\n");
-}
-
 static void timer_init(void)
 {
   RCC_ClocksTypeDef clocks;
@@ -290,6 +275,22 @@ static uint64_t board_a_rtos_now_us(void *context)
   }
   taskEXIT_CRITICAL();
   return now_us;
+}
+
+uint32_t board_a_rtos_now_ms(void)
+{
+  (void)board_a_rtos_now_us(NULL);
+  return board_a_monotonic_ms(&g_monotonic);
+}
+
+void board_a_rtos_note_config_stack(uint32_t min_words)
+{
+  g_board_a_rtos_diag.config_stack_min_words = min_words;
+}
+
+void board_a_rtos_note_storage_stack(uint32_t min_words)
+{
+  g_board_a_rtos_diag.storage_stack_min_words = min_words;
 }
 
 static bool model_lock(void *context)
@@ -625,11 +626,15 @@ static void process_rx_event(const board_a_rx_event_t *event)
 static void debug_status(uint64_t now_us)
 {
   board_a_runtime_status_t status;
+  board_a_persistence_status_t persistence;
 
   if (!board_a_log_schedule_due(&g_log_schedule, now_us)) {
     return;
   }
   if (!board_a_runtime_copy_status(&g_runtime, &status)) {
+    return;
+  }
+  if (!board_a_runtime_persistence_status(&g_runtime, &persistence)) {
     return;
   }
 
@@ -649,6 +654,24 @@ static void debug_status(uint64_t now_us)
   debug_write_u32(g_board_a_rtos_diag.uart_error_flags);
   debug_uart_puts(" txto=");
   debug_write_u32(g_board_a_rtos_diag.tx_timeouts);
+  debug_uart_puts(" gen=");
+  debug_write_u32(persistence.generated);
+  debug_uart_puts(" sync=");
+  debug_write_u32(persistence.synced);
+  debug_uart_puts(" drop=");
+  debug_write_u32(persistence.dropped);
+  debug_uart_puts(" q=");
+  debug_write_u32(persistence.queued);
+  debug_uart_puts(" st=");
+  debug_write_u32(persistence.storage_state);
+  debug_uart_puts(" stk=");
+  debug_write_u32(g_board_a_rtos_diag.comm_stack_min_words);
+  debug_uart_puts("/");
+  debug_write_u32(g_board_a_rtos_diag.acquisition_stack_min_words);
+  debug_uart_puts("/");
+  debug_write_u32(g_board_a_rtos_diag.config_stack_min_words);
+  debug_uart_puts("/");
+  debug_write_u32(g_board_a_rtos_diag.storage_stack_min_words);
   debug_uart_puts("\r\n");
 }
 
@@ -679,6 +702,12 @@ static void comm_task(void *argument)
         process_rx_event(&event);
         service_rx_fault();
       } while (xQueueReceive(g_rx_queue, &event, 0U) == pdPASS);
+      if (g_config_task != NULL) {
+        xTaskNotifyGive(g_config_task);
+      }
+      if (g_storage_task != NULL) {
+        xTaskNotifyGive(g_storage_task);
+      }
       continue;
     }
 
@@ -779,6 +808,9 @@ static void acquisition_task(void *argument)
     }
 
     board_a_runtime_tick(&g_runtime, now_us);
+    if (g_storage_task != NULL) {
+      xTaskNotifyGive(g_storage_task);
+    }
     if (!board_a_runtime_copy_status(&g_runtime, &status)) {
       wait_ms = BOARD_A_MAX_WAIT_MS;
     } else {
@@ -813,6 +845,8 @@ static void create_runtime_objects(void)
     board_a_rtos_fatal(BOARD_A_FAULT_TASK_CREATE);
   }
 
+  board_a_runtime_init(&g_runtime, 1U, &g_runtime_ops, NULL);
+
   g_comm_task = xTaskCreateStatic(
       comm_task, "comm", BOARD_A_COMM_STACK_WORDS, NULL,
       BOARD_A_COMM_TASK_PRIORITY, g_comm_stack, &g_comm_task_buffer);
@@ -820,12 +854,18 @@ static void create_runtime_objects(void)
       acquisition_task, "acq", BOARD_A_ACQUISITION_STACK_WORDS, NULL,
       BOARD_A_ACQUISITION_TASK_PRIORITY, g_acquisition_stack,
       &g_acquisition_task_buffer);
-  if ((g_comm_task == NULL) || (g_acquisition_task == NULL)) {
+  g_config_task = xTaskCreateStatic(
+      board_a_config_task, "config", BOARD_A_CONFIG_STACK_WORDS, &g_runtime,
+      1U, g_config_stack, &g_config_task_buffer);
+  g_storage_task = xTaskCreateStatic(
+      board_a_storage_task, "storage", BOARD_A_STORAGE_STACK_WORDS,
+      &g_runtime, 1U, g_storage_stack, &g_storage_task_buffer);
+  if ((g_comm_task == NULL) || (g_acquisition_task == NULL) ||
+      (g_config_task == NULL) || (g_storage_task == NULL)) {
     board_a_rtos_fatal(BOARD_A_FAULT_TASK_CREATE);
   }
 
   g_board_a_rtos_diag.rx_queue_item_size = sizeof(board_a_rx_event_t);
-  board_a_runtime_init(&g_runtime, 1U, &g_runtime_ops, NULL);
 }
 
 int board_a_rtos_run(void)
@@ -839,9 +879,10 @@ int board_a_rtos_run(void)
   board_a_tx_init(&g_tx);
   board_a_rx_recovery_init(&g_rx_recovery, BOARD_A_T35_US);
   board_a_log_schedule_init(&g_log_schedule, BOARD_A_LOG_PERIOD_US, 0U);
+  delay_init(168U);
   create_runtime_objects();
   rs485_init();
-  eeprom_diag_init();
+  board_a_persistence_startup(&g_runtime);
 
   debug_uart_puts("[board-a] scheduler starting\r\n");
   vTaskStartScheduler();

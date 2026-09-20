@@ -132,6 +132,17 @@ static bool runtime_command(board_a_runtime_t *runtime, uint16_t command)
          (memcmp(response, request, request_length) == 0);
 }
 
+static bool runtime_finish_drain(board_a_runtime_t *runtime)
+{
+  board_a_persistence_status_t status;
+
+  return board_a_runtime_persistence_status(runtime, &status) &&
+         (status.drain_state == BOARD_A_DRAIN_PENDING) &&
+         (board_a_runtime_complete_drain(runtime, status.drain_generation,
+                                         1),
+          true);
+}
+
 static bool runtime_submit_single(board_a_runtime_t *runtime, uint32_t id)
 {
   uint8_t request[64];
@@ -309,6 +320,43 @@ static void test_monotonic_wrap(void)
   CHECK(board_a_monotonic_value(&clock) == 32U);
 }
 
+static void test_monotonic_ms_across_tim2_wrap(void)
+{
+  board_a_monotonic_t clock = {0};
+  uint32_t deadline_ms;
+
+  /* 4294.0 s: three milliseconds before the 32-bit microsecond wrap. */
+  board_a_monotonic_init(&clock, 4294000000U);
+  CHECK(board_a_monotonic_ms(&clock) == 0U);
+
+  /* Three seconds later the raw counter wrapped; the extended clock must not. */
+  CHECK(board_a_monotonic_update(&clock, 2032704U) == 3000000U);
+  CHECK(board_a_monotonic_ms(&clock) == 3000U);
+
+  deadline_ms = 2000U;
+  CHECK((int32_t)(board_a_monotonic_ms(&clock) - deadline_ms) >= 0);
+  CHECK((int32_t)(1000U - deadline_ms) < 0);
+}
+
+static void test_deadline_predicate_across_ms_wrap(void)
+{
+  board_a_monotonic_t clock = {0};
+
+  CHECK(!board_a_deadline_expired(0xFFFFFF00U, 0x00000100U));
+  CHECK(board_a_deadline_expired(0x00000100U, 0x00000100U));
+  CHECK(board_a_deadline_expired(0x00000100U, 0xFFFFFF00U));
+  CHECK(board_a_deadline_expired(1000U, 1000U));
+  CHECK(!board_a_deadline_expired(999U, 1000U));
+
+  clock.accumulated_us = 4294967295000ULL; /* 4294967295 ms */
+  clock.initialized = true;
+  CHECK(board_a_monotonic_ms(&clock) == 0xFFFFFFFFU);
+  CHECK(board_a_monotonic_update(&clock, 2000000U) == 4294969295000ULL);
+  CHECK(board_a_monotonic_ms(&clock) == 1999U); /* natural u32 ms wrap */
+  CHECK(board_a_deadline_expired(board_a_monotonic_ms(&clock), 1000U));
+  CHECK(!board_a_deadline_expired(board_a_monotonic_ms(&clock), 3000U));
+}
+
 static void test_tx_state_machine(void)
 {
   static const uint8_t data[] = {0x11U, 0x22U, 0x33U};
@@ -403,6 +451,7 @@ static void test_model_commands_and_scheduler(void)
   CHECK(status.records_this_run == 2U);
 
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_STOP));
+  CHECK(runtime_finish_drain(&runtime));
   board_a_runtime_tick(&runtime, 21000000ULL);
   CHECK(board_a_runtime_copy_status(&runtime, &status));
   CHECK(status.sequence == 2U);
@@ -967,7 +1016,7 @@ static void test_t06_reset_defaults(void)
   pthread_mutex_destroy(&context.mutex);
 }
 
-/* T07: protocol 2 identity, unchanged 1..5 behavior, and 6/7 acceptance. */
+/* T07: protocol 3 identity, unchanged 1..5 behavior, and 6/7 acceptance. */
 static void test_t07_protocol_version_and_commands(void)
 {
   fake_lock_t context;
@@ -978,22 +1027,22 @@ static void test_t07_protocol_version_and_commands(void)
   p3b_runtime_setup(&runtime, &context, 14U);
   CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_PROTOCOL_VERSION,
                          &value) &&
-        (value == 2U));
+        (value == 3U));
 
   /* Protocol 1 command values keep their meanings. */
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_START));
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_START));
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_STOP));
+  CHECK(runtime_finish_drain(&runtime));
   CHECK(runtime_submit_single(&runtime, 0x00000001U));
   CHECK(runtime_submit_single(&runtime, 0x00000001U));
   CHECK(board_a_runtime_copy_status(&runtime, &status));
   CHECK(status.command_result == BOARD_A_COMMAND_RESULT_DUPLICATE);
 
-  /* SAVE_CONFIG stays unsupported. */
-  CHECK(runtime_command_expect_exception(&runtime, BOARD_A_COMMAND_SAVE_CONFIG,
-                                         0x04U));
+  /* SAVE_CONFIG is accepted into the asynchronous mailbox. */
+  CHECK(runtime_command(&runtime, BOARD_A_COMMAND_SAVE_CONFIG));
   CHECK(board_a_runtime_copy_status(&runtime, &status));
-  CHECK(status.command_result == BOARD_A_COMMAND_RESULT_UNSUPPORTED);
+  CHECK(status.command_result == BOARD_A_COMMAND_RESULT_ACCEPTED);
 
   /* Values outside the supported set are illegal values. */
   CHECK(runtime_command_expect_exception(&runtime, 0U, 0x03U));
@@ -1171,6 +1220,8 @@ static void test_concurrent_snapshot_and_commands(void)
 int main(void)
 {
   test_monotonic_wrap();
+  test_monotonic_ms_across_tim2_wrap();
+  test_deadline_predicate_across_ms_wrap();
   test_tx_state_machine();
   test_rx_recovery();
   test_model_commands_and_scheduler();

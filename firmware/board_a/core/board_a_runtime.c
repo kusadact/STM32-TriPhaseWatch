@@ -138,3 +138,133 @@ bool board_a_runtime_read_snapshot(board_a_runtime_t *runtime,
   runtime_unlock(runtime);
   return true;
 }
+
+bool board_a_runtime_claim_save(board_a_runtime_t *runtime,
+                                board_a_save_request_t *request)
+{
+  bool claimed = false;
+
+  if ((request == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  claimed = board_a_model_claim_save(&runtime->slave.model, request);
+  runtime_unlock(runtime);
+  return claimed;
+}
+
+void board_a_runtime_complete_save(board_a_runtime_t *runtime, int success,
+                                   board_a_save_error_t error,
+                                   uint32_t raw_error)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_complete_save(&runtime->slave.model, success, error,
+                              raw_error);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_pop_record(
+    board_a_runtime_t *runtime,
+    board_a_record_format_record_t *record)
+{
+  bool popped = false;
+
+  if ((record == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  popped = board_a_model_pop_record(&runtime->slave.model, record);
+  runtime_unlock(runtime);
+  return popped;
+}
+
+void board_a_runtime_requeue_record(
+    board_a_runtime_t *runtime,
+    const board_a_record_format_record_t *record)
+{
+  if ((record == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_requeue_record(&runtime->slave.model, record);
+  runtime_unlock(runtime);
+}
+
+void board_a_runtime_complete_record(
+    board_a_runtime_t *runtime,
+    const board_a_record_format_record_t *record,
+    board_a_record_complete_result_t result)
+{
+  if ((record == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_complete_record(&runtime->slave.model, record, result);
+  runtime_unlock(runtime);
+}
+
+void board_a_runtime_set_storage_state(
+    board_a_runtime_t *runtime, board_a_storage_state_t state,
+    board_a_storage_error_t error, uint32_t raw_error)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_set_storage_state(&runtime->slave.model, state, error,
+                                  raw_error);
+  runtime_unlock(runtime);
+}
+
+void board_a_runtime_note_storage_error(
+    board_a_runtime_t *runtime, board_a_storage_error_t error,
+    uint32_t raw_error)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_note_storage_error(&runtime->slave.model, error, raw_error);
+  runtime_unlock(runtime);
+}
+
+void board_a_runtime_complete_drain(board_a_runtime_t *runtime,
+                                    uint32_t generation, int success)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_complete_drain(&runtime->slave.model, generation, success);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_persistence_status(
+    board_a_runtime_t *runtime, board_a_persistence_status_t *status)
+{
+  if ((status == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  board_a_persistence_status(&runtime->slave.model.persistence,
+                             runtime->slave.model.active_config.version,
+                             status);
+  runtime_unlock(runtime);
+  return true;
+}
+
+void board_a_runtime_apply_loaded_config(
+    board_a_runtime_t *runtime, const board_a_persisted_config_t *config,
+    uint32_t sequence)
+{
+  if ((config == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_apply_loaded_config(&runtime->slave.model, config, sequence);
+  runtime_unlock(runtime);
+}
+
+void board_a_runtime_note_config_load(
+    board_a_runtime_t *runtime, board_a_config_load_state_t state,
+    uint32_t sequence)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_note_config_load(&runtime->slave.model, state, sequence);
+  runtime_unlock(runtime);
+}

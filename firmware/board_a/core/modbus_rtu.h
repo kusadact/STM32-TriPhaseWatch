@@ -17,7 +17,8 @@ typedef enum {
   MODBUS_RESULT_OK = 0,
   MODBUS_RESULT_ILLEGAL_ADDRESS,
   MODBUS_RESULT_ILLEGAL_VALUE,
-  MODBUS_RESULT_DEVICE_FAILURE
+  MODBUS_RESULT_DEVICE_FAILURE,
+  MODBUS_RESULT_SLAVE_BUSY
 } modbus_result_t;
 
 typedef modbus_result_t (*modbus_read_registers_fn)(
