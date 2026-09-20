@@ -26,3 +26,8 @@ uint64_t board_a_monotonic_value(const board_a_monotonic_t *clock)
 {
   return clock->accumulated_us;
 }
+
+uint32_t board_a_monotonic_ms(const board_a_monotonic_t *clock)
+{
+  return (uint32_t)(clock->accumulated_us / 1000ULL);
+}

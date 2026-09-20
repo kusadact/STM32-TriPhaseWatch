@@ -17,7 +17,6 @@ from tools.modbus_client.client import ModbusClient
 from tools.modbus_client.errors import (
     ModbusException,
     TransactionTimeout,
-    UnsupportedProtocolError,
 )
 from tools.modbus_client.protocol import (
     FUNCTION_READ_HOLDING,
@@ -206,22 +205,13 @@ class RealCCoreTests(unittest.TestCase):
     def test_python_and_c_crc_standard_vector_match(self) -> None:
         self.assertEqual(self.transport.crc(b"123456789"), 0x4B37)
 
-    def test_p3b_time_commands_reject_real_protocol_1_without_new_writes(self) -> None:
+    def test_protocol_3_time_commands_run_on_real_core(self) -> None:
         identity = self.service.identity()
-        if identity["protocol_version"] != 1:
-            self.skipTest(
-                "real C core reports protocol "
-                f"{identity['protocol_version']}; protocol 1 rejection is "
-                "covered by the fake-transport test"
-            )
-        first_time_set_write = len(self.transport.writes)
-        with self.assertRaises(UnsupportedProtocolError):
-            self.service.time_set(123)
-        self.assertEqual(len(self.transport.writes), first_time_set_write + 1)
-        self.assertEqual(
-            self.transport.writes[first_time_set_write][1],
-            FUNCTION_READ_INPUT,
-        )
+        self.assertEqual(identity["protocol_version"], 3)
+        result = self.service.time_set(123)
+        self.assertEqual(result["requested_utc_seconds"], 123)
+        self.assertEqual(result["time_status"]["time_status"], 1)
+        self.assertGreaterEqual(len(self.transport.writes), 5)
 
     def test_c07_single_dedup_window_and_eviction(self) -> None:
         first = self.service.single(1)
@@ -255,24 +245,22 @@ class RealCCoreTests(unittest.TestCase):
         self.assertEqual(stopped["records_this_run"], 3)
         snapshot = self.service.snapshot()
         self.assertEqual(snapshot["sequence"], 3)
-        self.service.stop()
-        self.service.stop()
+        self.service.stop(wait_for_drain=False)
+        self.service.stop(wait_for_drain=False)
         self.assertEqual(self.service.status()["run_state"], "STOPPED")
 
-    def test_c09_save_returns_exception_4_and_increments_error_count(self) -> None:
-        with self.assertRaises(ModbusException) as raised:
-            self.service.save()
-        self.assertEqual(raised.exception.exception_code, 4)
-        self.assertEqual(
-            raised.exception.observation["last_command"]["result"],
-            "UNSUPPORTED",
+    def test_c09_save_is_accepted_and_pending_without_storage_worker(self) -> None:
+        command_id = 0x10203040
+        self.service.write_multiple(
+            0x0040,
+            [2, command_id >> 16, command_id & 0xFFFF],
         )
-        status = self.service.status()
-        self.assertEqual(status["persistence_status"], 0)
-        self.assertEqual(status["last_command"]["name"], "SAVE_CONFIG")
-        self.assertEqual(status["last_command"]["result"], "UNSUPPORTED")
-        stats = self.service.stats()
-        self.assertEqual(stats["persistence_errors"], 1)
+        observation = self.service._observe_command()
+        self.assertEqual(observation["last_command"]["name"], "SAVE_CONFIG")
+        self.assertEqual(observation["last_command"]["result"], "ACCEPTED")
+        persistence = self.service.persistence_status()
+        self.assertEqual(persistence["save_state"], 1)
+        self.assertEqual(persistence["save_command_id"], command_id)
 
     def test_c10_invalid_addresses_and_atomic_config_write(self) -> None:
         with self.assertRaises(ModbusException) as raised:

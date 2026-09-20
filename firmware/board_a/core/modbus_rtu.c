@@ -11,6 +11,7 @@
 #define MODBUS_EXCEPTION_ILLEGAL_ADDRESS 0x02U
 #define MODBUS_EXCEPTION_ILLEGAL_VALUE 0x03U
 #define MODBUS_EXCEPTION_DEVICE_FAILURE 0x04U
+#define MODBUS_EXCEPTION_SLAVE_BUSY 0x06U
 
 static uint16_t read_u16_be(const uint8_t *data)
 {
@@ -60,6 +61,8 @@ static uint8_t exception_for_result(modbus_result_t result)
       return MODBUS_EXCEPTION_ILLEGAL_VALUE;
     case MODBUS_RESULT_DEVICE_FAILURE:
       return MODBUS_EXCEPTION_DEVICE_FAILURE;
+    case MODBUS_RESULT_SLAVE_BUSY:
+      return MODBUS_EXCEPTION_SLAVE_BUSY;
     case MODBUS_RESULT_OK:
     default:
       return MODBUS_EXCEPTION_DEVICE_FAILURE;

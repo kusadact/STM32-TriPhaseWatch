@@ -1,9 +1,11 @@
 #include "board_a_model.h"
 
+#include <string.h>
+
 #define BOARD_A_FIRMWARE_MAJOR 1U
 #define BOARD_A_FIRMWARE_MINOR 0U
 #define BOARD_A_FIRMWARE_PATCH 0U
-#define BOARD_A_PROTOCOL_VERSION 2U
+#define BOARD_A_PROTOCOL_VERSION 3U
 
 #define BOARD_A_DEFAULT_PERIOD_SEC 10U
 #define BOARD_A_DEFAULT_CHANNEL_MASK 0x0001U
@@ -99,10 +101,12 @@ static bool config_is_valid(const board_a_config_t *config)
 
 static void generate_record(board_a_model_t *model,
                             board_a_sample_trigger_t trigger,
-                            uint64_t now_us)
+                            uint64_t planned_us, uint64_t now_us)
 {
+  board_a_record_format_record_t record;
   uint8_t channel;
 
+  memset(&record, 0, sizeof(record));
   model->snapshot.valid = true;
   model->snapshot.sequence++;
   model->snapshot.sample_time_us = now_us;
@@ -126,6 +130,33 @@ static void generate_record(board_a_model_t *model,
       model->snapshot.channel_quality[channel] =
           BOARD_A_QUALITY_UNAVAILABLE;
     }
+  }
+
+  record.session_id = model->session_id;
+  record.sequence = model->snapshot.sequence;
+  record.trigger = (uint16_t)trigger;
+  record.planned_ms = planned_us / 1000U;
+  record.actual_ms = now_us / 1000U;
+  if (model->time.time_valid) {
+    record.utc_valid = 1U;
+    record.utc_seconds = current_utc_seconds(model, now_us);
+  } else {
+    record.utc_valid = 0U;
+    record.utc_seconds = 0U;
+  }
+  record.config_version = model->active_config.version;
+  record.period_sec = model->active_config.config.period_sec;
+  record.channel_mask = model->active_config.config.channel_mask;
+  record.sample_count = model->active_config.config.record_count;
+  record.source = BOARD_A_DATA_SOURCE_TEST;
+  for (channel = 0U; channel < BOARD_A_MAX_CHANNELS; channel++) {
+    record.values[channel] = model->snapshot.channel_values[channel];
+    record.units[channel] = BOARD_A_UNIT_COUNT;
+    record.qualities[channel] = model->snapshot.channel_quality[channel];
+  }
+
+  if (!board_a_persistence_queue_push(&model->persistence, &record)) {
+    model->stats.storage_dropped = model->persistence.storage.dropped;
   }
 }
 
@@ -186,12 +217,41 @@ static modbus_result_t execute_command(board_a_model_t *model,
       return MODBUS_RESULT_OK;
 
     case BOARD_A_COMMAND_SAVE_CONFIG:
-      model->stats.persistence_errors++;
-      set_command_status(model, command, BOARD_A_COMMAND_RESULT_UNSUPPORTED,
-                         command_id);
-      return MODBUS_RESULT_DEVICE_FAILURE;
+      {
+        board_a_persisted_config_t config;
+        board_a_save_accept_result_t accept_result;
+
+        config.period_sec = model->active_config.config.period_sec;
+        config.channel_mask = model->active_config.config.channel_mask;
+        config.record_count = model->active_config.config.record_count;
+        accept_result = board_a_persistence_accept_save(
+            &model->persistence, &config, model->active_config.version,
+            command_id);
+        if (accept_result == BOARD_A_SAVE_ACCEPT_BUSY) {
+          model->stats.persistence_errors++;
+          set_command_status(model, command,
+                             BOARD_A_COMMAND_RESULT_REJECTED, command_id);
+          return MODBUS_RESULT_SLAVE_BUSY;
+        }
+        if (accept_result != BOARD_A_SAVE_ACCEPT_OK) {
+          model->stats.persistence_errors++;
+          set_command_status(model, command,
+                             BOARD_A_COMMAND_RESULT_REJECTED, command_id);
+          return MODBUS_RESULT_ILLEGAL_VALUE;
+        }
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
+                           command_id);
+        return MODBUS_RESULT_OK;
+      }
 
     case BOARD_A_COMMAND_START:
+      if (model->persistence.storage.drain_state ==
+          BOARD_A_DRAIN_PENDING) {
+        model->stats.device_faults++;
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
+                           command_id);
+        return MODBUS_RESULT_SLAVE_BUSY;
+      }
       if (!model->active_config.valid) {
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
                            command_id);
@@ -219,17 +279,25 @@ static modbus_result_t execute_command(board_a_model_t *model,
       model->run_state = BOARD_A_RUN_STOPPED;
       model->start_pending = false;
       model->next_sample_us = 0U;
+      board_a_persistence_request_drain(&model->persistence);
       set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
                          command_id);
       return MODBUS_RESULT_OK;
 
     case BOARD_A_COMMAND_SINGLE:
+      if (model->persistence.storage.drain_state ==
+          BOARD_A_DRAIN_PENDING) {
+        model->stats.device_faults++;
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
+                           command_id);
+        return MODBUS_RESULT_SLAVE_BUSY;
+      }
       if (single_id_is_known(model, command_id)) {
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_DUPLICATE,
                            command_id);
         return MODBUS_RESULT_OK;
       }
-      generate_record(model, BOARD_A_SAMPLE_TRIGGER_SINGLE, 0U);
+      generate_record(model, BOARD_A_SAMPLE_TRIGGER_SINGLE, now_us, now_us);
       remember_single_id(model, command_id);
       set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
                          command_id);
@@ -255,6 +323,13 @@ static modbus_result_t execute_command(board_a_model_t *model,
       return MODBUS_RESULT_OK;
 
     case BOARD_A_COMMAND_ARM_START:
+      if (model->persistence.storage.drain_state ==
+          BOARD_A_DRAIN_PENDING) {
+        model->stats.device_faults++;
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
+                           command_id);
+        return MODBUS_RESULT_SLAVE_BUSY;
+      }
       if (!model->time.time_valid ||
           (model->run_state == BOARD_A_RUN_RUNNING)) {
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
@@ -394,7 +469,11 @@ static modbus_result_t read_input_register(const board_a_model_t *model,
       *value = word_low16(model->session_id);
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_PERSISTENCE_STATUS:
+      *value = (uint16_t)model->persistence.save.state;
+      return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_STORAGE_STATUS:
+      *value = (uint16_t)model->persistence.storage_state;
+      return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_RTOS_STATUS:
       *value = BOARD_A_STATUS_UNSUPPORTED;
       return MODBUS_RESULT_OK;
@@ -521,10 +600,10 @@ static modbus_result_t read_input_register(const board_a_model_t *model,
       *value = word_low16(model->stats.scheduler_missed);
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_STORAGE_DROPPED_HI:
-      *value = word_high16(model->stats.storage_dropped);
+      *value = word_high16(model->persistence.storage.dropped);
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_STORAGE_DROPPED_LO:
-      *value = word_low16(model->stats.storage_dropped);
+      *value = word_low16(model->persistence.storage.dropped);
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_PERSISTENCE_ERRORS_HI:
       *value = word_high16(model->stats.persistence_errors);
@@ -537,6 +616,168 @@ static modbus_result_t read_input_register(const board_a_model_t *model,
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_DEVICE_FAULTS_LO:
       *value = word_low16(model->stats.device_faults);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CONTRACT_REVISION:
+      *value = BOARD_A_PERSISTENCE_CONTRACT_REVISION;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_SAVE_STATE:
+      *value = (uint16_t)model->persistence.save.state;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_SAVE_COMMAND_ID_HI:
+      *value = (uint16_t)((model->persistence.save.state ==
+                           BOARD_A_SAVE_IDLE) ?
+                          0U :
+                          word_high16(
+                              model->persistence.save.request.command_id));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_SAVE_COMMAND_ID_LO:
+      *value = (uint16_t)((model->persistence.save.state ==
+                           BOARD_A_SAVE_IDLE) ?
+                          0U :
+                          word_low16(
+                              model->persistence.save.request.command_id));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_SAVE_CONFIG_VERSION_HI:
+      *value = (uint16_t)((model->persistence.save.state ==
+                           BOARD_A_SAVE_IDLE) ?
+                          0U :
+                          word_high16(
+                              model->persistence.save.request.config_version));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_SAVE_CONFIG_VERSION_LO:
+      *value = (uint16_t)((model->persistence.save.state ==
+                           BOARD_A_SAVE_IDLE) ?
+                          0U :
+                          word_low16(
+                              model->persistence.save.request.config_version));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_SAVE_ERROR:
+      *value = (uint16_t)model->persistence.save.error;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CONFIG_LOAD_STATE:
+      *value = (uint16_t)model->persistence.config_load_state;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_EXTENDED_STORAGE_STATE:
+      *value = (uint16_t)model->persistence.storage_state;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_EXTENDED_STORAGE_ERROR:
+      *value = (uint16_t)model->persistence.storage_error;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_QUEUED:
+      *value = model->persistence.storage.count;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_HIGH_WATER:
+      *value = model->persistence.storage.high_water;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_GENERATED_HI:
+      *value = word_high16(model->persistence.storage.generated);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_GENERATED_LO:
+      *value = word_low16(model->persistence.storage.generated);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_SYNCED_HI:
+      *value = word_high16(model->persistence.storage.synced);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_SYNCED_LO:
+      *value = word_low16(model->persistence.storage.synced);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_DROPPED_EXT_HI:
+      *value = word_high16(model->persistence.storage.dropped);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_DROPPED_EXT_LO:
+      *value = word_low16(model->persistence.storage.dropped);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_UNCERTAIN_HI:
+      *value = word_high16(model->persistence.storage.uncertain);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_UNCERTAIN_LO:
+      *value = word_low16(model->persistence.storage.uncertain);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_IN_FLIGHT:
+      *value = model->persistence.storage.in_flight;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DRAIN_STATE:
+      *value = (uint16_t)model->persistence.storage.drain_state;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LAST_SYNCED_SEQ_HI:
+      *value = word_high16(model->persistence.storage.last_synced_valid ?
+                           model->persistence.storage.last_synced_seq : 0U);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LAST_SYNCED_SEQ_LO:
+      *value = word_low16(model->persistence.storage.last_synced_valid ?
+                          model->persistence.storage.last_synced_seq : 0U);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LAST_SYNCED_FILE_HI:
+      *value = word_high16(model->persistence.storage.last_synced_valid ?
+                           model->persistence.storage.last_synced_file : 0U);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LAST_SYNCED_FILE_LO:
+      *value = word_low16(model->persistence.storage.last_synced_valid ?
+                          model->persistence.storage.last_synced_file : 0U);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LAST_SYNCED_DATE_HI:
+      *value = word_high16(model->persistence.storage.last_synced_valid ?
+                           model->persistence.storage.last_synced_date : 0U);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LAST_SYNCED_DATE_LO:
+      *value = word_low16(model->persistence.storage.last_synced_valid ?
+                          model->persistence.storage.last_synced_date : 0U);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_EXTENDED_ACTIVE_CONFIG_VERSION_HI:
+      *value = word_high16(model->active_config.version);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_EXTENDED_ACTIVE_CONFIG_VERSION_LO:
+      *value = word_low16(model->active_config.version);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DRAIN_GENERATION_HI:
+      *value = word_high16(model->persistence.storage.drain_generation);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DRAIN_GENERATION_LO:
+      *value = word_low16(model->persistence.storage.drain_generation);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_ERRORS_HI:
+      *value = word_high16(model->persistence.storage.storage_errors);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_STORAGE_ERRORS_LO:
+      *value = word_low16(model->persistence.storage.storage_errors);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LOAD_SEQUENCE_HI:
+      *value = word_high16(model->persistence.load_sequence);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_LOAD_SEQUENCE_LO:
+      *value = word_low16(model->persistence.load_sequence);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CAPTURED_PERIOD_HI:
+      *value = (uint16_t)((model->persistence.save.state ==
+                           BOARD_A_SAVE_IDLE) ?
+                          0U :
+                          word_high16(
+                              model->persistence.save.request.config.period_sec));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CAPTURED_PERIOD_LO:
+      *value = (uint16_t)((model->persistence.save.state ==
+                           BOARD_A_SAVE_IDLE) ?
+                          0U :
+                          word_low16(
+                              model->persistence.save.request.config.period_sec));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CAPTURED_MASK:
+      *value = (model->persistence.save.state == BOARD_A_SAVE_IDLE) ?
+          0U : model->persistence.save.request.config.channel_mask;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CAPTURED_COUNT:
+      *value = (model->persistence.save.state == BOARD_A_SAVE_IDLE) ?
+          0U : model->persistence.save.request.config.record_count;
+      return MODBUS_RESULT_OK;
+    case 0x00A8:
+    case 0x00A9:
+    case 0x00AA:
+    case 0x00AB:
+    case 0x00AC:
+    case 0x00AD:
+    case 0x00AE:
+    case 0x00AF:
+      *value = 0U;
       return MODBUS_RESULT_OK;
     default:
       return MODBUS_RESULT_ILLEGAL_ADDRESS;
@@ -598,6 +839,7 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->stats.storage_dropped = 0U;
   model->stats.persistence_errors = 0U;
   model->stats.device_faults = 0U;
+  board_a_persistence_init(&model->persistence);
 }
 
 modbus_result_t board_a_model_read_registers(void *context,
@@ -761,14 +1003,6 @@ modbus_result_t board_a_model_write_registers(void *context,
   }
 
   command_id = ((uint32_t)command_id_hi << 16U) | (uint32_t)command_id_lo;
-  if (writes_command &&
-      (command_register == BOARD_A_COMMAND_SAVE_CONFIG)) {
-    model->stats.persistence_errors++;
-    set_command_status(model, command_register,
-                       BOARD_A_COMMAND_RESULT_UNSUPPORTED, command_id);
-    return MODBUS_RESULT_DEVICE_FAILURE;
-  }
-
   model->command_register = command_register;
   model->command_id_hi = command_id_hi;
   model->command_id_lo = command_id_lo;
@@ -825,7 +1059,7 @@ void board_a_model_tick(board_a_model_t *model, uint64_t now_us)
   }
 
   if (model->start_pending) {
-    generate_record(model, BOARD_A_SAMPLE_TRIGGER_PERIODIC, now_us);
+    generate_record(model, BOARD_A_SAMPLE_TRIGGER_PERIODIC, now_us, now_us);
     model->records_this_run++;
     model->start_pending = false;
     model->next_sample_us = now_us + period_us;
@@ -833,7 +1067,8 @@ void board_a_model_tick(board_a_model_t *model, uint64_t now_us)
              (now_us >= model->next_sample_us)) {
     missed = (now_us - model->next_sample_us) / period_us;
     model->stats.scheduler_missed += (uint32_t)missed;
-    generate_record(model, BOARD_A_SAMPLE_TRIGGER_PERIODIC, now_us);
+    generate_record(model, BOARD_A_SAMPLE_TRIGGER_PERIODIC,
+                    model->next_sample_us, now_us);
     model->records_this_run++;
     model->next_sample_us = now_us + period_us;
   }
@@ -844,5 +1079,124 @@ void board_a_model_tick(board_a_model_t *model, uint64_t now_us)
     model->run_state = BOARD_A_RUN_STOPPED;
     model->start_pending = false;
     model->next_sample_us = 0U;
+    board_a_persistence_request_drain(&model->persistence);
   }
+}
+
+void board_a_model_apply_loaded_config(
+    board_a_model_t *model, const board_a_persisted_config_t *config,
+    uint32_t sequence)
+{
+  if ((model == NULL) || (config == NULL)) {
+    return;
+  }
+  if ((config->period_sec < BOARD_A_PERIOD_MIN_SEC) ||
+      (config->period_sec > BOARD_A_PERIOD_MAX_SEC) ||
+      (config->channel_mask < BOARD_A_CHANNEL_MASK_MIN) ||
+      (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX)) {
+    board_a_model_note_config_load(
+        model, BOARD_A_CONFIG_LOAD_DEFAULT_ERROR, 0U);
+    return;
+  }
+  model->pending_config.period_sec = config->period_sec;
+  model->pending_config.channel_mask = config->channel_mask;
+  model->pending_config.record_count = config->record_count;
+  model->active_config.config = model->pending_config;
+  model->active_config.valid = true;
+  board_a_persistence_note_load(&model->persistence,
+                                BOARD_A_CONFIG_LOAD_SUCCESS, sequence);
+}
+
+void board_a_model_note_config_load(
+    board_a_model_t *model, board_a_config_load_state_t state,
+    uint32_t sequence)
+{
+  if (model == NULL) {
+    return;
+  }
+  if (state == BOARD_A_CONFIG_LOAD_DEFAULT_ERROR) {
+    model->stats.persistence_errors++;
+  }
+  board_a_persistence_note_load(&model->persistence, state, sequence);
+}
+
+int board_a_model_claim_save(board_a_model_t *model,
+                             board_a_save_request_t *request)
+{
+  return (model == NULL) ? 0 :
+      board_a_persistence_claim_save(&model->persistence, request);
+}
+
+void board_a_model_complete_save(
+    board_a_model_t *model, int success, board_a_save_error_t error,
+    uint32_t raw_error)
+{
+  if (model == NULL) {
+    return;
+  }
+  if (success == 0) {
+    model->stats.persistence_errors++;
+  }
+  board_a_persistence_complete_save(&model->persistence, success, error,
+                                    raw_error);
+}
+
+int board_a_model_pop_record(
+    board_a_model_t *model, board_a_record_format_record_t *record)
+{
+  return (model == NULL) ? 0 :
+      board_a_persistence_queue_pop(&model->persistence, record);
+}
+
+void board_a_model_requeue_record(
+    board_a_model_t *model,
+    const board_a_record_format_record_t *record)
+{
+  if (model == NULL) {
+    return;
+  }
+  board_a_persistence_queue_requeue(&model->persistence, record);
+}
+
+void board_a_model_complete_record(
+    board_a_model_t *model,
+    const board_a_record_format_record_t *record,
+    board_a_record_complete_result_t result)
+{
+  if (model == NULL) {
+    return;
+  }
+  board_a_persistence_complete_record(&model->persistence, record, result);
+}
+
+void board_a_model_set_storage_state(
+    board_a_model_t *model, board_a_storage_state_t state,
+    board_a_storage_error_t error, uint32_t raw_error)
+{
+  if (model == NULL) {
+    return;
+  }
+  board_a_persistence_set_storage_state(&model->persistence, state, error,
+                                        raw_error);
+}
+
+void board_a_model_note_storage_error(
+    board_a_model_t *model, board_a_storage_error_t error,
+    uint32_t raw_error)
+{
+  if (model == NULL) {
+    return;
+  }
+  board_a_persistence_note_storage_error(&model->persistence, error,
+                                         raw_error);
+}
+
+void board_a_model_complete_drain(board_a_model_t *model,
+                                  uint32_t generation, int success)
+{
+  if (model == NULL) {
+    return;
+  }
+  board_a_persistence_complete_drain(&model->persistence, generation,
+                                     success);
 }

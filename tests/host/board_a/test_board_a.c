@@ -269,7 +269,7 @@ static void test_normal_reads(void)
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PERSISTENCE_STATUS) == 0U);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_STORAGE_STATUS) == 0U);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_RTOS_STATUS) == 0U);
-  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PROTOCOL_VERSION) == 2U);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PROTOCOL_VERSION) == 3U);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_TIME_STATUS) ==
         BOARD_A_TIME_STATUS_UNCALIBRATED);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_SCHEDULE_STATE) ==
@@ -756,15 +756,18 @@ static void test_commands_and_scheduler(void)
   board_a_slave_init(&slave, 0x00000009U);
 
   {
-    uint8_t request[8];
-    size_t request_length = make_write_single_request(
-        request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_COMMAND,
-        BOARD_A_COMMAND_SAVE_CONFIG);
-    CHECK(expect_exception(&slave, request, request_length, 0x04U));
+    CHECK(command(&slave, BOARD_A_COMMAND_SAVE_CONFIG));
+    {
+      uint8_t request[8];
+      size_t request_length = make_write_single_request(
+          request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_COMMAND,
+          BOARD_A_COMMAND_SAVE_CONFIG);
+      CHECK(expect_exception(&slave, request, request_length, 0x06U));
+    }
   }
-  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PERSISTENCE_STATUS) == 0U);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PERSISTENCE_STATUS) == 1U);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_COMMAND_RESULT) ==
-        BOARD_A_COMMAND_RESULT_UNSUPPORTED);
+        BOARD_A_COMMAND_RESULT_REJECTED);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_PERSISTENCE_ERRORS_LO) == 1U);
 
   CHECK(write_multiple(&slave, BOARD_A_HOLDING_CFG_PERIOD_SEC, config, 3U));

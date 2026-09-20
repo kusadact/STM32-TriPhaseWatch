@@ -4,11 +4,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import os
+import struct
 import tempfile
 import unittest
 
 from tools.modbus_cli import main
 from tools.modbus_client.protocol import (
+    FUNCTION_READ_INPUT,
     FUNCTION_WRITE_SINGLE,
     append_crc,
 )
@@ -172,13 +174,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["error"]["kind"], "state_mismatch")
         self.assertEqual(stderr, "")
 
-    def test_save_reports_exception_4_and_observation(self) -> None:
+    def test_protocol_2_save_reports_exception_4_and_observation(self) -> None:
         calls = 0
 
         def handler(request: bytes) -> bytes:
             nonlocal calls
             calls += 1
             if calls == 1:
+                return read_response(request, (1, 1, 0, 0, 2))
+            if calls == 2:
                 return exception_response(request, 4)
             return read_response(
                 request,
@@ -292,7 +296,10 @@ class CliTests(unittest.TestCase):
             (
                 ["stop"],
                 lambda request: (
-                    write_response(request)
+                    read_response(request, (1, 1, 0, 0, 2))
+                    if request[1] == FUNCTION_READ_INPUT
+                    and struct.unpack_from(">H", request, 2)[0] == 0
+                    else write_response(request)
                     if request[1] == FUNCTION_WRITE_SINGLE
                     else read_response(
                         request,

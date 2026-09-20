@@ -70,4 +70,46 @@ bool board_a_runtime_copy_status(board_a_runtime_t *runtime,
 bool board_a_runtime_read_snapshot(board_a_runtime_t *runtime,
                                    board_a_snapshot_t *snapshot);
 
+bool board_a_runtime_claim_save(board_a_runtime_t *runtime,
+                                board_a_save_request_t *request);
+
+void board_a_runtime_complete_save(board_a_runtime_t *runtime, int success,
+                                   board_a_save_error_t error,
+                                   uint32_t raw_error);
+
+bool board_a_runtime_pop_record(
+    board_a_runtime_t *runtime,
+    board_a_record_format_record_t *record);
+
+void board_a_runtime_requeue_record(
+    board_a_runtime_t *runtime,
+    const board_a_record_format_record_t *record);
+
+void board_a_runtime_complete_record(
+    board_a_runtime_t *runtime,
+    const board_a_record_format_record_t *record,
+    board_a_record_complete_result_t result);
+
+void board_a_runtime_set_storage_state(
+    board_a_runtime_t *runtime, board_a_storage_state_t state,
+    board_a_storage_error_t error, uint32_t raw_error);
+
+void board_a_runtime_note_storage_error(
+    board_a_runtime_t *runtime, board_a_storage_error_t error,
+    uint32_t raw_error);
+
+void board_a_runtime_complete_drain(board_a_runtime_t *runtime,
+                                    uint32_t generation, int success);
+
+bool board_a_runtime_persistence_status(
+    board_a_runtime_t *runtime, board_a_persistence_status_t *status);
+
+void board_a_runtime_apply_loaded_config(
+    board_a_runtime_t *runtime, const board_a_persisted_config_t *config,
+    uint32_t sequence);
+
+void board_a_runtime_note_config_load(
+    board_a_runtime_t *runtime, board_a_config_load_state_t state,
+    uint32_t sequence);
+
 #endif /* BOARD_A_RUNTIME_H */

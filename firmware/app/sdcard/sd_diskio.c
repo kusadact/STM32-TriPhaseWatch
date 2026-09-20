@@ -59,6 +59,9 @@ static DRESULT sd_disk_transfer(BYTE pdrv, BYTE *buff, DWORD sector, UINT count,
   for (attempt = 0u; attempt < 2u; attempt++) {
     sd_spi_result_t result;
 
+    if (sd_spi_deadline_expired() != 0u) {
+      return RES_ERROR;
+    }
     if (write != 0u) {
       result = sd_spi_write_blocks((uint32_t)sector, (const uint8_t *)buff,
                                    (uint32_t)count);

@@ -20,6 +20,8 @@ echo "CC  board_a_core_adapter.c + fixed bare-metal core"
   "$CORE_DIR/modbus_rtu_rx.c" \
   "$CORE_DIR/modbus_crc.c" \
   "$CORE_DIR/modbus_rtu.c" \
+  "$CORE_DIR/board_a_persistence.c" \
+  "$CORE_DIR/board_a_record_format.c" \
   "$CORE_DIR/board_a_model.c" \
   -o "$BUILD_DIR/board_a_core_adapter"
 
