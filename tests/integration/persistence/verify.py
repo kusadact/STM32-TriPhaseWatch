@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -39,6 +38,7 @@ EXIT_NOT_RUN = 2
 EXIT_INCONCLUSIVE = 3
 
 UTC_OBSERVATION_TOLERANCE_S = 3
+SET_TIME_COMMAND = 6
 
 
 class VerifyInputError(ValueError):
@@ -670,19 +670,6 @@ def _verify_records(
     return all_records
 
 
-def _observation_utc_seconds(observation: Mapping[str, Any]) -> int | None:
-    value = observation.get("observed_utc")
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return int(parsed.timestamp())
-
-
 def _verify_timeline(
     report: Report,
     parsed_files: Sequence[oracle.ParsedCsv],
@@ -709,7 +696,7 @@ def _verify_timeline(
     )
 
     utc_start = len(report.issues)
-    observed_by_seq: dict[int, tuple[int, float | None]] = {}
+    observed_monotonic_by_seq: dict[int, float] = {}
     for observation in observations:
         if observation.get("kind") != "snapshot":
             continue
@@ -717,47 +704,85 @@ def _verify_timeline(
         if not isinstance(value, Mapping):
             continue
         sequence = value.get("sequence")
-        seconds = _observation_utc_seconds(observation)
         monotonic = observation.get("observed_monotonic_s")
-        if isinstance(sequence, int) and seconds is not None:
-            observed_by_seq.setdefault(
-                sequence,
-                (
-                    seconds,
-                    float(monotonic)
-                    if isinstance(monotonic, (int, float))
-                    else None,
-                ),
-            )
+        if isinstance(sequence, int) and isinstance(monotonic, (int, float)):
+            observed_monotonic_by_seq.setdefault(sequence, float(monotonic))
 
-    anchor_utc: int | None = None
-    anchor_monotonic: float | None = None
-    anchor_host_utc: int | None = None
+    # Every successful SET_TIME starts a new anchor segment: the device clock
+    # is user-set, so records are compared against the anchor in force at
+    # their observation time instead of the host wall clock.
+    anchors: list[tuple[float, int]] = []
     for observation in observations:
         value = observation.get("value")
         if not isinstance(value, Mapping):
             continue
         if "requested_utc_seconds" not in value:
             continue
-        try:
-            anchor_utc = int(value["requested_utc_seconds"])
-        except (TypeError, ValueError):
+        if value.get("command") != SET_TIME_COMMAND or value.get("result") != 1:
             continue
         monotonic = observation.get("observed_monotonic_s")
-        anchor_monotonic = (
-            float(monotonic) if isinstance(monotonic, (int, float)) else None
-        )
-        anchor_host_utc = _observation_utc_seconds(observation)
-        break
+        if not isinstance(monotonic, (int, float)):
+            continue
+        try:
+            requested_utc = int(value["requested_utc_seconds"])
+        except (TypeError, ValueError):
+            continue
+        anchors.append((float(monotonic), requested_utc))
+    anchors.sort(key=lambda anchor: anchor[0])
 
-    # Device-internal consistency: UTC deltas must track the sampling clock.
+    def active_anchor(monotonic: float) -> tuple[float, int] | None:
+        selected: tuple[float, int] | None = None
+        for anchor in anchors:
+            if anchor[0] > monotonic:
+                break
+            selected = anchor
+        return selected
+
+    has_utc_records = any(
+        record.utc_valid == 1 for parsed in parsed_files for record in parsed.records
+    )
+
+    checked = 0
+    missing = 0
+    unanchored = 0
     for parsed in parsed_files:
         previous: oracle.CsvRecord | None = None
+        previous_anchor: tuple[float, int] | None = None
         for record_index, record in enumerate(parsed.records):
             if record.utc_valid != 1:
                 previous = None
+                previous_anchor = None
                 continue
-            if previous is not None:
+            monotonic = observed_monotonic_by_seq.get(record.seq)
+            if monotonic is None:
+                missing += 1
+                previous = None
+                previous_anchor = None
+                continue
+            anchor = active_anchor(monotonic)
+            if anchor is None:
+                unanchored += 1
+                previous = None
+                previous_anchor = None
+                continue
+            expected_utc = anchor[1] + int(monotonic - anchor[0])
+            checked += 1
+            if abs(record.utc_s - expected_utc) > UTC_OBSERVATION_TOLERANCE_S:
+                report.add_issue(
+                    "utc_host_mapping",
+                    (
+                        f"{parsed.relative_path}:{record_index + 2}: utc_s="
+                        f"{record.utc_s} differs from the SET_TIME-anchored "
+                        f"expectation {expected_utc} by more than "
+                        f"{UTC_OBSERVATION_TOLERANCE_S} s"
+                    ),
+                    path=parsed.relative_path,
+                    record_index=record_index,
+                )
+            # Device-internal consistency only holds inside one SET_TIME
+            # segment; a legal re-set makes the step across the boundary
+            # meaningless.
+            if previous is not None and previous_anchor == anchor:
                 utc_step = record.utc_s - previous.utc_s
                 sample_step = (record.actual_ms - previous.actual_ms) // 1000
                 if abs(utc_step - sample_step) > 1:
@@ -772,47 +797,23 @@ def _verify_timeline(
                         record_index=record_index,
                     )
             previous = record
+            previous_anchor = anchor
 
-    anchor_consistent = (
-        anchor_utc is not None
-        and anchor_host_utc is not None
-        and abs(anchor_host_utc - anchor_utc) <= UTC_OBSERVATION_TOLERANCE_S
-    )
-    has_utc_records = any(
-        record.utc_valid == 1 for parsed in parsed_files for record in parsed.records
-    )
-
-    checked = 0
-    missing = 0
-    if anchor_consistent and anchor_monotonic is not None:
-        for parsed in parsed_files:
-            for record_index, record in enumerate(parsed.records):
-                if record.utc_valid != 1:
-                    continue
-                observed = observed_by_seq.get(record.seq)
-                if observed is None or observed[1] is None:
-                    missing += 1
-                    continue
-                expected_utc = anchor_utc + int(observed[1] - anchor_monotonic)
-                checked += 1
-                if abs(record.utc_s - expected_utc) > UTC_OBSERVATION_TOLERANCE_S:
-                    report.add_issue(
-                        "utc_host_mapping",
-                        (
-                            f"{parsed.relative_path}:{record_index + 2}: utc_s="
-                            f"{record.utc_s} differs from the SET_TIME-anchored "
-                            f"expectation {expected_utc} by more than "
-                            f"{UTC_OBSERVATION_TOLERANCE_S} s"
-                        ),
-                        path=parsed.relative_path,
-                        record_index=record_index,
-                    )
-    elif has_utc_records:
+    if has_utc_records and not anchors:
         report.add_issue(
             "utc_anchor_evidence",
             (
-                "UTC-valid records exist but no host-consistent SET_TIME anchor "
-                "with monotonic observations is available"
+                "UTC-valid records exist but no successful SET_TIME anchor with "
+                "a monotonic observation is available"
+            ),
+            status="INCONCLUSIVE",
+        )
+    elif unanchored:
+        report.add_issue(
+            "utc_anchor_evidence",
+            (
+                f"{unanchored} UTC-valid record(s) have no preceding SET_TIME "
+                "anchor"
             ),
             status="INCONCLUSIVE",
         )
@@ -820,8 +821,8 @@ def _verify_timeline(
         report.add_issue(
             "utc_mapping_evidence",
             (
-                f"{missing} UTC-valid record(s) have no matching host snapshot "
-                "observation"
+                f"{missing} UTC-valid record(s) have no matching snapshot "
+                "observation with a monotonic timestamp"
             ),
             status="INCONCLUSIVE",
         )
@@ -836,8 +837,9 @@ def _verify_timeline(
         "utc_mapping",
         utc_status,
         (
-            f"cross-checked {checked} UTC-valid record(s) against the SET_TIME "
-            f"anchor; {missing} without matching evidence"
+            f"cross-checked {checked} UTC-valid record(s) against "
+            f"{len(anchors)} SET_TIME anchor(s); {missing} without matching "
+            "evidence"
         ),
     )
 

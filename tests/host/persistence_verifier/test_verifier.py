@@ -10,6 +10,7 @@ import unittest
 from typing import Callable
 
 from fixture_factory import (
+    BASE_UTC,
     make_valid_fixture,
     rewrite_csv,
 )
@@ -99,6 +100,35 @@ class VerifierTests(unittest.TestCase):
             self.assertTrue(
                 (files_dir / "LOG/UNSET/00000001.CSV").is_file()
             )
+
+    def test_explicit_historical_time_passes(self) -> None:
+        # The device clock is user-set: a value that differs from the host
+        # wall clock is legal as long as the records follow the SET_TIME
+        # anchor and the sampling clock.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, files_dir = make_valid_fixture(
+                root,
+                utc_base=BASE_UTC - 3600,
+            )
+            report = self._verify(root, run_dir, files_dir)
+            self.assertEqual(report.exit_code, 0, report.issues)
+            self.assertEqual(report.overall, "PASS")
+
+    def test_mid_run_set_time_segments_pass(self) -> None:
+        # A legal second SET_TIME before the fourth record jumps the device
+        # clock; the UTC check must segment on every successful SET_TIME
+        # instead of comparing across the boundary or against the host clock.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, files_dir = make_valid_fixture(
+                root,
+                record_count=7,
+                second_set_time=(3, BASE_UTC + 3600 + (3 * 10 - 5)),
+            )
+            report = self._verify(root, run_dir, files_dir)
+            self.assertEqual(report.exit_code, 0, report.issues)
+            self.assertEqual(report.overall, "PASS")
 
     def test_u16_channel_wrap_passes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

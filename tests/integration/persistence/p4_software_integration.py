@@ -35,6 +35,31 @@ from p4_adapter_transport import SubprocessAdapterTransport
 _CANDIDATE_CLIENT: Any = None
 _CANDIDATE_SERVICE: Any = None
 
+# The synthetic adapter advances a virtual device clock by a fixed step per
+# exchange, so the anchored UTC mapping cannot hold in this layer. These are
+# the only codes accepted as a documented synthetic limitation; any other
+# failing code still fails the integration run.
+SYNTHETIC_UTC_LIMITATION_CODES = frozenset(
+    {"utc_anchor_evidence", "utc_host_mapping", "utc_mapping_evidence"}
+)
+
+
+def _utc_synthetic_limitation(
+    utc_status: str | None,
+    issue_codes: list[str],
+) -> tuple[bool, list[str], list[str]]:
+    """Classify a non-PASS synthetic UTC result for the driver's acceptance."""
+
+    codes = set(issue_codes)
+    limitation_codes = sorted(codes & SYNTHETIC_UTC_LIMITATION_CODES)
+    other_codes = sorted(codes - SYNTHETIC_UTC_LIMITATION_CODES)
+    accepted = (
+        utc_status is not None
+        and utc_status != "PASS"
+        and not other_codes
+    )
+    return accepted, limitation_codes, other_codes
+
 
 def _bind_candidate_cli(
     integration_root: Path,
@@ -263,6 +288,12 @@ def main(argv: list[str] | None = None) -> int:
         (check for check in report.checks if check["name"] == "utc_mapping"),
         None,
     )
+    utc_limitation, utc_limitation_codes, non_utc_issue_codes = (
+        _utc_synthetic_limitation(
+            utc_check["status"] if utc_check is not None else None,
+            [issue["code"] for issue in report.issues],
+        )
+    )
     save = _save_observation(args.run_output)
     expected_config = {
         "period_sec": args.period_s,
@@ -289,12 +320,18 @@ def main(argv: list[str] | None = None) -> int:
         "synthetic_layer": "host-modbus+EEPROM-file+SD-file-substitute",
         "synthetic_limitations": (
             [
-                "utc_mapping INCONCLUSIVE: the virtual device clock is set to "
-                "2024-02-29 and has no host-consistent SET_TIME anchor"
+                (
+                    f"utc_mapping {utc_check['status']}: the synthetic adapter "
+                    f"advances the device clock {args.time_step_us} us per "
+                    "exchange, so device UTC cannot track the host monotonic "
+                    "clock; the anchored UTC mapping is not applicable to this "
+                    f"layer (codes: {', '.join(utc_limitation_codes) or 'none'})"
+                )
             ]
-            if utc_check is not None and utc_check["status"] == "INCONCLUSIVE"
+            if utc_limitation
             else []
         ),
+        "non_utc_issue_codes": non_utc_issue_codes,
         "run_exit": run_code,
         "verify_exit": report.exit_code,
         "verify_overall": report.overall,
@@ -320,10 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         check
         for check in report.checks
         if check["status"] != "PASS"
-        and not (
-            check["name"] == "utc_mapping"
-            and check["status"] == "INCONCLUSIVE"
-        )
+        and not (check["name"] == "utc_mapping" and utc_limitation)
     ]
     if unexpected:
         return 1

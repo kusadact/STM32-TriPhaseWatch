@@ -26,6 +26,10 @@ BASE_UTC = int(
     datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc).timestamp()
 )
 
+# A second SET_TIME is emitted this many seconds before the first record that
+# carries the re-set device clock.
+SECOND_SET_TIME_LEAD_S = 5.0
+
 
 def valid_identity() -> dict[str, Any]:
     return validate_identity(
@@ -177,6 +181,8 @@ def make_valid_fixture(
     sample_count: int = 0,
     config_version: int = 1,
     utc_valid: int = 1,
+    utc_base: int = BASE_UTC,
+    second_set_time: tuple[int, int] | None = None,
     start_generated: int = 0,
     end_generated: int | None = None,
     end_synced: int | None = None,
@@ -201,7 +207,16 @@ def make_valid_fixture(
     records: list[dict[str, int]] = []
     for offset in range(record_count):
         seq = (seq_start + offset) % (1 << 32)
-        utc_s = BASE_UTC + (offset * period_s) if utc_valid else 0
+        if not utc_valid:
+            utc_s = 0
+        elif second_set_time is not None and offset >= second_set_time[0]:
+            utc_s = (
+                second_set_time[1]
+                + int(SECOND_SET_TIME_LEAD_S)
+                + ((offset - second_set_time[0]) * period_s)
+            )
+        else:
+            utc_s = utc_base + (offset * period_s)
         file_date = int(oracle.utc_date_text(utc_s)) if utc_valid else 0
         planned_ms = 1_000_000 + (offset * ((period_s * 1000) + 5))
         actual_ms = planned_ms + 5
@@ -338,7 +353,7 @@ def make_valid_fixture(
             {
                 "kind": "command",
                 "value": {
-                    "requested_utc_seconds": BASE_UTC,
+                    "requested_utc_seconds": utc_base,
                     "command": 6,
                     "result": 1,
                 },
@@ -349,6 +364,30 @@ def make_valid_fixture(
             }
         )
     for index, record in enumerate(records):
+        if (
+            utc_valid
+            and second_set_time is not None
+            and index == second_set_time[0]
+        ):
+            observations.append(
+                {
+                    "kind": "command",
+                    "value": {
+                        "requested_utc_seconds": second_set_time[1],
+                        "command": 6,
+                        "result": 1,
+                    },
+                    "observed_utc": datetime.fromtimestamp(
+                        BASE_UTC
+                        + (index * period_s)
+                        - int(SECOND_SET_TIME_LEAD_S),
+                        tz=timezone.utc,
+                    ).isoformat(),
+                    "observed_monotonic_s": (
+                        100.0 + (index * period_s) - SECOND_SET_TIME_LEAD_S
+                    ),
+                }
+            )
         snapshot_observation: dict[str, Any] = {
             "kind": "snapshot",
             "value": {
@@ -365,7 +404,7 @@ def make_valid_fixture(
         }
         if utc_valid:
             snapshot_observation["observed_utc"] = datetime.fromtimestamp(
-                record["utc_s"], tz=timezone.utc
+                BASE_UTC + (index * period_s), tz=timezone.utc
             ).isoformat()
             snapshot_observation["observed_monotonic_s"] = (
                 100.0 + (index * period_s)
