@@ -14,6 +14,7 @@
 #include "eeprom_config.h"
 #include "queue.h"
 #include "semphr.h"
+#include "soft_i2c.h"
 #include "stm32f4xx.h"
 #include "task.h"
 
@@ -315,6 +316,17 @@ static const board_a_runtime_ops_t g_runtime_ops = {
   model_unlock,
   board_a_rtos_now_us
 };
+
+/*
+ * Board A uses TIM2 for microsecond delays, not SysTick. The production
+ * soft-I2C init runs before the scheduler, so report readiness from the
+ * actual delay backend instead of the legacy SysTick check.
+ */
+bool soft_i2c_platform_ready(void)
+{
+  return ((RCC->APB1ENR & RCC_APB1ENR_TIM2EN) != 0U) &&
+         ((TIM2->CR1 & TIM_CR1_CEN) != 0U);
+}
 
 static void rs485_init(void)
 {

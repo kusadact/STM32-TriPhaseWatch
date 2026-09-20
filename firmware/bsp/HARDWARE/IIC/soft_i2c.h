@@ -1,6 +1,7 @@
 #ifndef BUSCOMM_SOFT_I2C_H
 #define BUSCOMM_SOFT_I2C_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef enum {
@@ -11,6 +12,13 @@ typedef enum {
   SOFT_I2C_ERROR_NOT_READY,
   SOFT_I2C_ERROR_BUSY
 } soft_i2c_result_t;
+
+/*
+ * Platform readiness hook. The weak default in soft_i2c.c checks the
+ * legacy SysTick delay backend; targets that use a different delay source
+ * (for example board A with TIM2) provide a strong override.
+ */
+bool soft_i2c_platform_ready(void);
 
 soft_i2c_result_t soft_i2c_init(void);
 soft_i2c_result_t soft_i2c_recover(void);
