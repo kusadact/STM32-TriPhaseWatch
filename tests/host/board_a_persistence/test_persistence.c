@@ -604,6 +604,77 @@ static int test_storage_engine_name_batch_and_deadline(void)
   return 0;
 }
 
+static int test_queue_requeue_when_full_keeps_old_record(void)
+{
+  board_a_persistence_t persistence;
+  board_a_record_format_record_t record;
+  board_a_record_format_record_t out;
+  uint32_t index;
+
+  board_a_persistence_init(&persistence);
+  for (index = 1U; index <= BOARD_A_RECORD_QUEUE_CAPACITY; index++) {
+    record = make_record(index, 0U, 0U);
+    CHECK(board_a_persistence_queue_push(&persistence, &record) == 1);
+  }
+
+  CHECK(board_a_persistence_queue_pop(&persistence, &out));
+  CHECK(out.sequence == 1U);
+  CHECK(persistence.storage.count == BOARD_A_RECORD_QUEUE_CAPACITY - 1U);
+  CHECK(persistence.storage.in_flight == 1U);
+
+  record = make_record(33U, 0U, 0U);
+  CHECK(board_a_persistence_queue_push(&persistence, &record) == 1);
+  CHECK(persistence.storage.count == BOARD_A_RECORD_QUEUE_CAPACITY);
+
+  board_a_persistence_queue_requeue(&persistence, &out);
+  CHECK(persistence.storage.in_flight == 0U);
+  CHECK(persistence.storage.count == BOARD_A_RECORD_QUEUE_CAPACITY);
+  CHECK(persistence.storage.dropped == 1U);
+  CHECK(persistence.storage.generated == 33U);
+  CHECK(board_a_persistence_invariant_holds(&persistence));
+
+  for (index = 1U; index <= BOARD_A_RECORD_QUEUE_CAPACITY; index++) {
+    CHECK(board_a_persistence_queue_pop(&persistence, &out));
+    CHECK(out.sequence == index);
+    board_a_persistence_complete_record(
+        &persistence, &out, BOARD_A_RECORD_COMPLETE_SYNCED);
+    CHECK(board_a_persistence_invariant_holds(&persistence));
+  }
+  CHECK(persistence.storage.count == 0U);
+  CHECK(persistence.storage.in_flight == 0U);
+  CHECK(persistence.storage.synced == BOARD_A_RECORD_QUEUE_CAPACITY);
+  CHECK(persistence.storage.dropped == 1U);
+  return 0;
+}
+
+static int test_record_path_capacity_boundaries(void)
+{
+  char path[40];
+
+  memset(path, 0xA5, sizeof(path));
+  CHECK(!board_a_record_format_make_path(path, 20U, 20260920U, 1U));
+  CHECK((unsigned char)path[0] == 0xA5U);
+
+  memset(path, 0xA5, sizeof(path));
+  CHECK(!board_a_record_format_make_path(path, 28U, 20260920U, 1U));
+  CHECK((unsigned char)path[0] == 0xA5U);
+
+  memset(path, 0xA5, sizeof(path));
+  CHECK(board_a_record_format_make_path(path, 29U, 20260920U, 1U));
+  CHECK(strcmp(path, "0:/LOG/20260920/00000001.CSV") == 0);
+  CHECK((unsigned char)path[29] == 0xA5U);
+
+  memset(path, 0xA5, sizeof(path));
+  CHECK(!board_a_record_format_make_path(path, 25U, 0U, 1U));
+  CHECK((unsigned char)path[0] == 0xA5U);
+
+  memset(path, 0xA5, sizeof(path));
+  CHECK(board_a_record_format_make_path(path, 26U, 0U, 1U));
+  CHECK(strcmp(path, "0:/LOG/UNSET/00000001.CSV") == 0);
+  CHECK((unsigned char)path[26] == 0xA5U);
+  return 0;
+}
+
 int main(void)
 {
   CHECK(test_config_payload_codec() == 0);
@@ -616,6 +687,8 @@ int main(void)
   CHECK(test_synced_identity_updates_persistence() == 0);
   CHECK(test_storage_engine_failures() == 0);
   CHECK(test_storage_engine_name_batch_and_deadline() == 0);
+  CHECK(test_queue_requeue_when_full_keeps_old_record() == 0);
+  CHECK(test_record_path_capacity_boundaries() == 0);
   puts("PASS test_persistence");
   return 0;
 }

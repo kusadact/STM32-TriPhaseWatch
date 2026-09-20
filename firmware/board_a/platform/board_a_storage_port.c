@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "FreeRTOS.h"
+#include "board_a_rtos.h"
 #include "ff.h"
 #include "sd_spi.h"
 #include "stm32f4xx.h"
@@ -16,7 +17,7 @@ static uint8_t g_storage_mounted;
 static uint32_t storage_port_now_ms(void *context)
 {
   (void)context;
-  return (uint32_t)(TIM2->CNT / 1000U);
+  return board_a_rtos_now_ms();
 }
 
 static void storage_port_deadline_begin(uint32_t deadline_ms)

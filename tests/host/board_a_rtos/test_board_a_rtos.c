@@ -320,6 +320,24 @@ static void test_monotonic_wrap(void)
   CHECK(board_a_monotonic_value(&clock) == 32U);
 }
 
+static void test_monotonic_ms_across_tim2_wrap(void)
+{
+  board_a_monotonic_t clock = {0};
+  uint32_t deadline_ms;
+
+  /* 4294.0 s: three milliseconds before the 32-bit microsecond wrap. */
+  board_a_monotonic_init(&clock, 4294000000U);
+  CHECK(board_a_monotonic_ms(&clock) == 0U);
+
+  /* Three seconds later the raw counter wrapped; the extended clock must not. */
+  CHECK(board_a_monotonic_update(&clock, 2032704U) == 3000000U);
+  CHECK(board_a_monotonic_ms(&clock) == 3000U);
+
+  deadline_ms = 2000U;
+  CHECK((int32_t)(board_a_monotonic_ms(&clock) - deadline_ms) >= 0);
+  CHECK((int32_t)(1000U - deadline_ms) < 0);
+}
+
 static void test_tx_state_machine(void)
 {
   static const uint8_t data[] = {0x11U, 0x22U, 0x33U};
@@ -1183,6 +1201,7 @@ static void test_concurrent_snapshot_and_commands(void)
 int main(void)
 {
   test_monotonic_wrap();
+  test_monotonic_ms_across_tim2_wrap();
   test_tx_state_machine();
   test_rx_recovery();
   test_model_commands_and_scheduler();

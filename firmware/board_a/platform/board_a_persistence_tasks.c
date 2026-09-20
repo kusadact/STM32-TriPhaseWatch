@@ -6,6 +6,7 @@
 #include "FreeRTOS.h"
 #include "board_a_storage_engine.h"
 #include "board_a_storage_port.h"
+#include "board_a_rtos.h"
 #include "config_store.h"
 #include "eeprom_config.h"
 #include "task.h"
@@ -50,7 +51,7 @@ static board_a_save_error_t map_save_error(config_store_status_t status)
 
 static uint32_t persistence_now_ms(void)
 {
-  return (uint32_t)(TIM2->CNT / 1000U);
+  return board_a_rtos_now_ms();
 }
 
 static int deadline_expired(uint32_t now_ms, uint32_t deadline_ms)
@@ -185,6 +186,8 @@ void board_a_config_task(void *argument)
     (void)xTaskNotifyWait(0U, 0xFFFFFFFFUL, &notification_value,
                           pdMS_TO_TICKS(1000));
     (void)notification_value;
+    board_a_rtos_note_config_stack(
+        (uint32_t)uxTaskGetStackHighWaterMark(NULL));
     config_task_once(runtime);
   }
 }
@@ -380,6 +383,9 @@ void board_a_storage_task(void *argument)
     uint32_t now_ms = persistence_now_ms();
     uint32_t wait_ms = BOARD_A_STORAGE_RETRY_PERIOD_MS;
     int did_work = 0;
+
+    board_a_rtos_note_storage_stack(
+        (uint32_t)uxTaskGetStackHighWaterMark(NULL));
 
     if (!board_a_runtime_persistence_status(runtime, &status)) {
       (void)xTaskNotifyWait(0U, 0xFFFFFFFFUL, &notification_value,

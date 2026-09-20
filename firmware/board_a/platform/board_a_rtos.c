@@ -277,6 +277,22 @@ static uint64_t board_a_rtos_now_us(void *context)
   return now_us;
 }
 
+uint32_t board_a_rtos_now_ms(void)
+{
+  (void)board_a_rtos_now_us(NULL);
+  return board_a_monotonic_ms(&g_monotonic);
+}
+
+void board_a_rtos_note_config_stack(uint32_t min_words)
+{
+  g_board_a_rtos_diag.config_stack_min_words = min_words;
+}
+
+void board_a_rtos_note_storage_stack(uint32_t min_words)
+{
+  g_board_a_rtos_diag.storage_stack_min_words = min_words;
+}
+
 static bool model_lock(void *context)
 {
   (void)context;
@@ -648,6 +664,14 @@ static void debug_status(uint64_t now_us)
   debug_write_u32(persistence.queued);
   debug_uart_puts(" st=");
   debug_write_u32(persistence.storage_state);
+  debug_uart_puts(" stk=");
+  debug_write_u32(g_board_a_rtos_diag.comm_stack_min_words);
+  debug_uart_puts("/");
+  debug_write_u32(g_board_a_rtos_diag.acquisition_stack_min_words);
+  debug_uart_puts("/");
+  debug_write_u32(g_board_a_rtos_diag.config_stack_min_words);
+  debug_uart_puts("/");
+  debug_write_u32(g_board_a_rtos_diag.storage_stack_min_words);
   debug_uart_puts("\r\n");
 }
 

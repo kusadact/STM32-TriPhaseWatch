@@ -310,6 +310,7 @@ int board_a_record_format_make_path(char *path, size_t capacity,
 {
   const char *prefix;
   size_t prefix_length;
+  size_t required_length;
   char date[9];
 
   if ((path == NULL) || (file_id == 0U)) {
@@ -321,7 +322,11 @@ int board_a_record_format_make_path(char *path, size_t capacity,
     prefix = "0:/LOG/";
   }
   prefix_length = strlen(prefix);
-  if (capacity < (prefix_length + 8U + 4U + 1U)) {
+  required_length = prefix_length + 8U + 4U + 1U;
+  if (file_date != 0U) {
+    required_length += 9U; /* 8-digit date plus '/' */
+  }
+  if (capacity < required_length) {
     return 0;
   }
 

@@ -151,9 +151,18 @@ void board_a_persistence_queue_requeue(
     return;
   }
   storage = &persistence->storage;
-  if ((storage->in_flight == 0U) ||
-      (storage->count >= BOARD_A_RECORD_QUEUE_CAPACITY)) {
+  if (storage->in_flight == 0U) {
     return;
+  }
+  if (storage->count >= BOARD_A_RECORD_QUEUE_CAPACITY) {
+    /*
+     * The queue filled while this record was in flight. Keep the older
+     * record and drop the newest queued one, matching the documented
+     * drop-new policy; generated = synced + dropped + uncertain +
+     * queued + in_flight still holds.
+     */
+    storage->count--;
+    storage->dropped++;
   }
 
   storage->head =
