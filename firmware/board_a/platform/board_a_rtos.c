@@ -57,6 +57,8 @@ typedef struct {
   volatile uint32_t tx_completions;
   volatile uint32_t model_lock_max_us;
   volatile uint32_t schedule_late_max_us;
+  volatile uint32_t schedule_start_late_max_us;
+  volatile uint32_t schedule_start_count;
   volatile uint32_t monotonic_wrap_count;
   volatile uint32_t fault_flags;
   volatile uint32_t rx_queue_item_size;
@@ -780,6 +782,13 @@ static void acquisition_task(void *argument)
     if (!board_a_runtime_copy_status(&g_runtime, &status)) {
       wait_ms = BOARD_A_MAX_WAIT_MS;
     } else {
+      if (status.schedule_start_late_us >
+          g_board_a_rtos_diag.schedule_start_late_max_us) {
+        g_board_a_rtos_diag.schedule_start_late_max_us =
+            status.schedule_start_late_us;
+      }
+      g_board_a_rtos_diag.schedule_start_count =
+          status.schedule_start_count;
       wait_ms = acquisition_wait_ms(&status, now_us);
     }
 

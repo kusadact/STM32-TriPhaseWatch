@@ -28,6 +28,8 @@ typedef struct {
   uint64_t schedule_deadline_us;
   bool start_pending;
   bool schedule_armed;
+  uint32_t schedule_start_late_us;
+  uint32_t schedule_start_count;
   board_a_model_stats_t stats;
 } board_a_runtime_status_t;
 

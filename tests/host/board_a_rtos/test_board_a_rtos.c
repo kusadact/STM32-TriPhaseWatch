@@ -614,6 +614,8 @@ static void test_t02_armed_start_waits_for_target(void)
   CHECK(status.sequence == 1U);
   CHECK(status.records_this_run == 1U);
   CHECK(status.next_sample_us == P3B_ANCHOR_US + 15000000ULL);
+  CHECK(status.schedule_start_count == 1U);
+  CHECK(status.schedule_start_late_us == 0U);
   CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_SCHEDULE_STATE,
                          &value) &&
         (value == BOARD_A_SCHEDULE_STATE_NONE));
@@ -904,12 +906,15 @@ static void test_t05_wake_crossing_starts_once(void)
   CHECK(status.records_this_run == 1U);
   CHECK(status.stats.scheduler_missed == 0U);
   CHECK(status.next_sample_us == late_us + 10000000ULL);
+  CHECK(status.schedule_start_count == 1U);
+  CHECK(status.schedule_start_late_us == 30000000U);
 
   /* A repeated tick at the same instant must not replay the missed periods. */
   board_a_runtime_tick(&runtime, late_us);
   CHECK(board_a_runtime_copy_status(&runtime, &status));
   CHECK(status.sequence == 1U);
   CHECK(status.records_this_run == 1U);
+  CHECK(status.schedule_start_count == 1U);
 
   /* The next periodic record arrives at the re-phased deadline only. */
   board_a_runtime_tick(&runtime, late_us + 10000000ULL);

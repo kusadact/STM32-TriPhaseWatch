@@ -583,6 +583,8 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->time.schedule_armed = false;
   model->time.schedule_target_seconds = 0U;
   model->time.schedule_deadline_us = 0U;
+  model->time.schedule_start_late_us = 0U;
+  model->time.schedule_start_count = 0U;
   model->stats.rx_frames = 0U;
   model->stats.crc_errors = 0U;
   model->stats.address_mismatch = 0U;
@@ -788,6 +790,15 @@ void board_a_model_tick(board_a_model_t *model, uint64_t now_us)
 
   if (model->time.schedule_armed &&
       (now_us >= model->time.schedule_deadline_us)) {
+    uint64_t late_us = now_us - model->time.schedule_deadline_us;
+
+    if (late_us > (uint64_t)UINT32_MAX) {
+      late_us = (uint64_t)UINT32_MAX;
+    }
+    if ((uint32_t)late_us > model->time.schedule_start_late_us) {
+      model->time.schedule_start_late_us = (uint32_t)late_us;
+    }
+    model->time.schedule_start_count++;
     /*
      * The wake that crosses the target starts the run exactly once with the
      * active configuration at that instant. Clearing the schedule first keeps

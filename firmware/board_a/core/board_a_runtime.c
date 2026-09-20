@@ -117,6 +117,10 @@ bool board_a_runtime_copy_status(board_a_runtime_t *runtime,
   status->start_pending = runtime->slave.model.start_pending;
   status->schedule_deadline_us = runtime->slave.model.time.schedule_deadline_us;
   status->schedule_armed = runtime->slave.model.time.schedule_armed;
+  status->schedule_start_late_us =
+      runtime->slave.model.time.schedule_start_late_us;
+  status->schedule_start_count =
+      runtime->slave.model.time.schedule_start_count;
   status->stats = runtime->slave.model.stats;
 
   runtime_unlock(runtime);

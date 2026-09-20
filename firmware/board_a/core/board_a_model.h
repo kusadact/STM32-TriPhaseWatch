@@ -194,6 +194,8 @@ typedef struct {
   bool schedule_armed;
   uint32_t schedule_target_seconds;
   uint64_t schedule_deadline_us;
+  uint32_t schedule_start_late_us;
+  uint32_t schedule_start_count;
 } board_a_time_state_t;
 
 typedef struct {
