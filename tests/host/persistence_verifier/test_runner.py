@@ -207,6 +207,8 @@ class RunnerTests(unittest.TestCase):
                         str(output),
                         "--identity",
                         str(root / "missing.json"),
+                        "--integration-root",
+                        str(root),
                     ]
                 )
             self.assertEqual(code, 2)

@@ -33,16 +33,67 @@ from persistence.manifest import (
     RunArtifacts,
     build_initial_manifest,
     load_identity,
+    sha256_file,
     utc_now_iso,
     validate_identity,
     write_json_atomic,
 )
 
-from tools.modbus_client.client import ModbusClient
-from tools.modbus_client.errors import ModbusClientError, StateError
-from tools.modbus_client.service import ModbusService
-from tools.modbus_client.transport import MacOSTTYTransport
-from tools.modbus_client.timeparse import split_u32
+_CANDIDATE_CLIENT: Any = None
+_CANDIDATE_SERVICE: Any = None
+_CANDIDATE_TRANSPORT: Any = None
+_CANDIDATE_MODBUS_ERRORS: tuple[type[BaseException], ...] = (RuntimeError,)
+_CANDIDATE_STATE_ERROR: type[BaseException] = RuntimeError
+
+
+def _split_u32(value: int) -> tuple[int, int]:
+    return ((value >> 16) & 0xFFFF, value & 0xFFFF)
+
+
+_CANDIDATE_SPLIT_U32: Any = _split_u32
+
+
+def _bind_candidate_cli(
+    integration_root: Path,
+    identity: dict[str, Any],
+) -> None:
+    global _CANDIDATE_CLIENT, _CANDIDATE_SERVICE, _CANDIDATE_TRANSPORT
+    global _CANDIDATE_SPLIT_U32, _CANDIDATE_MODBUS_ERRORS
+    global _CANDIDATE_STATE_ERROR
+
+    root = integration_root.resolve()
+    service_path = root / "tools" / "modbus_client" / "service.py"
+    if not service_path.is_file():
+        print(f"integration root has no candidate CLI: {service_path}", file=sys.stderr)
+        raise SystemExit(2)
+    expected = str(identity["cli"]["source_sha256"]).lower()
+    actual = sha256_file(service_path)
+    if actual != expected:
+        print(
+            "integration root CLI hash mismatch: "
+            f"expected {expected}, actual {actual}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    sys.path.insert(0, str(root))
+    for name in [
+        name
+        for name in sys.modules
+        if name == "tools" or name.startswith("tools.")
+    ]:
+        del sys.modules[name]
+    from tools.modbus_client.client import ModbusClient
+    from tools.modbus_client.errors import ModbusClientError, StateError
+    from tools.modbus_client.service import ModbusService
+    from tools.modbus_client.transport import MacOSTTYTransport
+    from tools.modbus_client.timeparse import split_u32
+
+    _CANDIDATE_CLIENT = ModbusClient
+    _CANDIDATE_SERVICE = ModbusService
+    _CANDIDATE_TRANSPORT = MacOSTTYTransport
+    _CANDIDATE_SPLIT_U32 = split_u32
+    _CANDIDATE_MODBUS_ERRORS = (ModbusClientError,)
+    _CANDIDATE_STATE_ERROR = StateError
 
 
 EXIT_CAPTURE_PASS_END_TO_END_NOT_RUN = 3
@@ -75,6 +126,7 @@ class RunConfig:
     sample_count: int
     save_at_s: float | None
     set_time_utc: int | None
+    integration_root: Path | None = None
 
     def parameters(self) -> dict[str, Any]:
         return {
@@ -89,6 +141,9 @@ class RunConfig:
             "sample_count": self.sample_count,
             "save_at_s": self.save_at_s,
             "set_time_utc": self.set_time_utc,
+            "integration_root": (
+                str(self.integration_root) if self.integration_root else None
+            ),
         }
 
 
@@ -238,7 +293,7 @@ class ScenarioRunner:
         while True:
             storage = self._read_storage()
             if storage["drain_state"] == 3:
-                raise StateError("storage drain failed")
+                raise _CANDIDATE_STATE_ERROR("storage drain failed")
             if (
                 storage["drain_state"] == 2
                 and storage["queued"] == 0
@@ -301,7 +356,7 @@ class ScenarioRunner:
             config_observation["sample_count"],
         )
         if actual_active != expected_active:
-            raise StateError(
+            raise _CANDIDATE_STATE_ERROR(
                 "applied configuration does not match requested configuration",
                 expected=expected_active,
                 actual=actual_active,
@@ -320,7 +375,7 @@ class ScenarioRunner:
     def _set_time(self, utc_seconds: int) -> None:
         if not 0 <= utc_seconds < 0xFFFFFFFF:
             raise RunnerInputError("set_time_utc is outside the legal UTC range")
-        words = split_u32(utc_seconds)
+        words = _CANDIDATE_SPLIT_U32(utc_seconds)
 
         def callback() -> dict[str, Any]:
             self.service.write_multiple(HOLDING_PENDING_UTC_START, words)
@@ -330,7 +385,7 @@ class ScenarioRunner:
                 INPUT_COMMAND_OBSERVATION_COUNT,
             )
             if observation[7] != COMMAND_SET_TIME or observation[8] != 1:
-                raise StateError(
+                raise _CANDIDATE_STATE_ERROR(
                     "SET_TIME command was not accepted",
                     command=observation[7],
                     result=observation[8],
@@ -353,7 +408,9 @@ class ScenarioRunner:
     def _save(self) -> None:
         method = getattr(self.service, "save", None)
         if method is None:
-            raise StateError("production service does not expose save()")
+            raise _CANDIDATE_STATE_ERROR(
+                "production service does not expose save()"
+            )
         signature = inspect.signature(method)
         accepts_command_id = (
             "command_id" in signature.parameters
@@ -448,13 +505,13 @@ class ScenarioRunner:
             final_storage["generated"] - short_start_storage["generated"]
         ) % (1 << 32)
         if generated != self.config.sample_count:
-            raise StateError(
+            raise _CANDIDATE_STATE_ERROR(
                 "short run generated count does not match requested finite count",
                 generated=generated,
                 requested=self.config.sample_count,
             )
         if final_status.get("records_this_run") != self.config.sample_count:
-            raise StateError(
+            raise _CANDIDATE_STATE_ERROR(
                 "short run status count does not match requested finite count",
                 status_count=final_status.get("records_this_run"),
                 requested=self.config.sample_count,
@@ -497,7 +554,7 @@ class ScenarioRunner:
         start_status = self._read_status("pre-start-status")
         start_storage = self._read_storage()
         if start_storage["queued"] != 0 or start_storage["in_flight"] != 0:
-            raise StateError(
+            raise _CANDIDATE_STATE_ERROR(
                 "baseline start requires an empty queue and no in-flight record",
                 queued=start_storage["queued"],
                 in_flight=start_storage["in_flight"],
@@ -552,7 +609,9 @@ class ScenarioRunner:
         final_stats = self._read_stats()
         final_storage = self._read_storage()
         if final_status.get("run_state_code") != 0:
-            raise StateError("baseline STOP did not leave the device stopped")
+            raise _CANDIDATE_STATE_ERROR(
+                "baseline STOP did not leave the device stopped"
+            )
         self._checkpoint(
             "baseline_end",
             status=final_status,
@@ -586,14 +645,22 @@ def _production_connection_factory(
     config: RunConfig,
     recorder: EvidenceRecorder,
 ) -> Connection:
-    transport = MacOSTTYTransport(config.port, logger=recorder)
-    client = ModbusClient(
+    if (
+        _CANDIDATE_TRANSPORT is None
+        or _CANDIDATE_CLIENT is None
+        or _CANDIDATE_SERVICE is None
+    ):
+        raise RunnerInputError(
+            "candidate CLI is not bound; run the command entry point"
+        )
+    transport = _CANDIDATE_TRANSPORT(config.port, logger=recorder)
+    client = _CANDIDATE_CLIENT(
         transport,
         timeout_seconds=config.timeout_s,
         logger=recorder,
     )
     capturing_client = CapturingClient(client, recorder)
-    service = ModbusService(capturing_client, address=config.address)
+    service = _CANDIDATE_SERVICE(capturing_client, address=config.address)
     client.open()
 
     def close() -> None:
@@ -701,7 +768,7 @@ def run_scenario(
     try:
         try:
             connection = connection_factory(config, recorder)
-        except (ModbusClientError, OSError, RunnerInputError) as exc:
+        except (*_CANDIDATE_MODBUS_ERRORS, OSError, RunnerInputError) as exc:
             capture = "NOT_RUN"
             exit_code = EXIT_INPUT_ENVIRONMENT
             reason = f"environment/input failure: {type(exc).__name__}: {exc}"
@@ -837,6 +904,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="frozen identity JSON; missing fields are rejected",
     )
     parser.add_argument(
+        "--integration-root",
+        required=True,
+        type=Path,
+        help="candidate integration tree root; CLI source hash is verified",
+    )
+    parser.add_argument(
         "--duration-s",
         type=_positive_float,
         help="short wait bound or baseline duration; defaults short=60, baseline=7200",
@@ -892,6 +965,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         sample_count=sample_count,
         save_at_s=save_at,
         set_time_utc=args.set_time_utc,
+        integration_root=args.integration_root,
     )
 
 
@@ -900,6 +974,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = config_from_args(args)
         identity = load_identity(config.identity_path)
+        _bind_candidate_cli(args.integration_root, identity)
     except (ManifestError, RunnerInputError, OSError, ValueError) as exc:
         print(f"run: {exc}", file=sys.stderr)
         return EXIT_INPUT_ENVIRONMENT
