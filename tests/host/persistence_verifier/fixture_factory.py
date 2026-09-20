@@ -345,6 +345,7 @@ def make_valid_fixture(
                 "observed_utc": datetime.fromtimestamp(
                     BASE_UTC, tz=timezone.utc
                 ).isoformat(),
+                "observed_monotonic_s": 100.0,
             }
         )
     for index, record in enumerate(records):
@@ -366,6 +367,9 @@ def make_valid_fixture(
             snapshot_observation["observed_utc"] = datetime.fromtimestamp(
                 record["utc_s"], tz=timezone.utc
             ).isoformat()
+            snapshot_observation["observed_monotonic_s"] = (
+                100.0 + (index * period_s)
+            )
         observations.append(snapshot_observation)
         if index == 0 and include_repeated_poll:
             repeated = dict(snapshot_observation)

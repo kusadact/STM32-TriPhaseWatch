@@ -259,6 +259,10 @@ def main(argv: list[str] | None = None) -> int:
         boot_epoch=str(manifest["boot_epoch"]),
     )
     report = verify_run(args.run_output, storage_root, args.verify_output)
+    utc_check = next(
+        (check for check in report.checks if check["name"] == "utc_mapping"),
+        None,
+    )
     save = _save_observation(args.run_output)
     expected_config = {
         "period_sec": args.period_s,
@@ -283,6 +287,14 @@ def main(argv: list[str] | None = None) -> int:
     ]
     summary = {
         "synthetic_layer": "host-modbus+EEPROM-file+SD-file-substitute",
+        "synthetic_limitations": (
+            [
+                "utc_mapping INCONCLUSIVE: the virtual device clock is set to "
+                "2024-02-29 and has no host-consistent SET_TIME anchor"
+            ]
+            if utc_check is not None and utc_check["status"] == "INCONCLUSIVE"
+            else []
+        ),
         "run_exit": run_code,
         "verify_exit": report.exit_code,
         "verify_overall": report.overall,
@@ -304,8 +316,17 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(summary, indent=2, sort_keys=True))
     if run_code != 3:
         return 1
-    if report.exit_code != 0:
-        return report.exit_code
+    unexpected = [
+        check
+        for check in report.checks
+        if check["status"] != "PASS"
+        and not (
+            check["name"] == "utc_mapping"
+            and check["status"] == "INCONCLUSIVE"
+        )
+    ]
+    if unexpected:
+        return 1
     if restart["status"] != "PASS":
         return 1
     return 0

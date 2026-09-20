@@ -709,7 +709,7 @@ def _verify_timeline(
     )
 
     utc_start = len(report.issues)
-    observed_by_seq: dict[int, int] = {}
+    observed_by_seq: dict[int, tuple[int, float | None]] = {}
     for observation in observations:
         if observation.get("kind") != "snapshot":
             continue
@@ -718,38 +718,104 @@ def _verify_timeline(
             continue
         sequence = value.get("sequence")
         seconds = _observation_utc_seconds(observation)
+        monotonic = observation.get("observed_monotonic_s")
         if isinstance(sequence, int) and seconds is not None:
-            observed_by_seq.setdefault(sequence, seconds)
+            observed_by_seq.setdefault(
+                sequence,
+                (
+                    seconds,
+                    float(monotonic)
+                    if isinstance(monotonic, (int, float))
+                    else None,
+                ),
+            )
 
-    has_time_set = any(
-        isinstance(observation.get("value"), Mapping)
-        and "requested_utc_seconds" in observation["value"]
-        for observation in observations
+    anchor_utc: int | None = None
+    anchor_monotonic: float | None = None
+    anchor_host_utc: int | None = None
+    for observation in observations:
+        value = observation.get("value")
+        if not isinstance(value, Mapping):
+            continue
+        if "requested_utc_seconds" not in value:
+            continue
+        try:
+            anchor_utc = int(value["requested_utc_seconds"])
+        except (TypeError, ValueError):
+            continue
+        monotonic = observation.get("observed_monotonic_s")
+        anchor_monotonic = (
+            float(monotonic) if isinstance(monotonic, (int, float)) else None
+        )
+        anchor_host_utc = _observation_utc_seconds(observation)
+        break
+
+    # Device-internal consistency: UTC deltas must track the sampling clock.
+    for parsed in parsed_files:
+        previous: oracle.CsvRecord | None = None
+        for record_index, record in enumerate(parsed.records):
+            if record.utc_valid != 1:
+                previous = None
+                continue
+            if previous is not None:
+                utc_step = record.utc_s - previous.utc_s
+                sample_step = (record.actual_ms - previous.actual_ms) // 1000
+                if abs(utc_step - sample_step) > 1:
+                    report.add_issue(
+                        "utc_step",
+                        (
+                            f"{parsed.relative_path}:{record_index + 2}: UTC "
+                            f"advanced {utc_step} s while the sampling clock "
+                            f"advanced {sample_step} s"
+                        ),
+                        path=parsed.relative_path,
+                        record_index=record_index,
+                    )
+            previous = record
+
+    anchor_consistent = (
+        anchor_utc is not None
+        and anchor_host_utc is not None
+        and abs(anchor_host_utc - anchor_utc) <= UTC_OBSERVATION_TOLERANCE_S
+    )
+    has_utc_records = any(
+        record.utc_valid == 1 for parsed in parsed_files for record in parsed.records
     )
 
     checked = 0
     missing = 0
-    for parsed in parsed_files:
-        for record_index, record in enumerate(parsed.records):
-            if record.utc_valid != 1:
-                continue
-            observed = observed_by_seq.get(record.seq)
-            if observed is None:
-                missing += 1
-                continue
-            checked += 1
-            if abs(observed - record.utc_s) > UTC_OBSERVATION_TOLERANCE_S:
-                report.add_issue(
-                    "utc_host_mapping",
-                    (
-                        f"{parsed.relative_path}:{record_index + 2}: utc_s="
-                        f"{record.utc_s} differs from the host observation "
-                        f"({observed}) by more than "
-                        f"{UTC_OBSERVATION_TOLERANCE_S} s"
-                    ),
-                    path=parsed.relative_path,
-                    record_index=record_index,
-                )
+    if anchor_consistent and anchor_monotonic is not None:
+        for parsed in parsed_files:
+            for record_index, record in enumerate(parsed.records):
+                if record.utc_valid != 1:
+                    continue
+                observed = observed_by_seq.get(record.seq)
+                if observed is None or observed[1] is None:
+                    missing += 1
+                    continue
+                expected_utc = anchor_utc + int(observed[1] - anchor_monotonic)
+                checked += 1
+                if abs(record.utc_s - expected_utc) > UTC_OBSERVATION_TOLERANCE_S:
+                    report.add_issue(
+                        "utc_host_mapping",
+                        (
+                            f"{parsed.relative_path}:{record_index + 2}: utc_s="
+                            f"{record.utc_s} differs from the SET_TIME-anchored "
+                            f"expectation {expected_utc} by more than "
+                            f"{UTC_OBSERVATION_TOLERANCE_S} s"
+                        ),
+                        path=parsed.relative_path,
+                        record_index=record_index,
+                    )
+    elif has_utc_records:
+        report.add_issue(
+            "utc_anchor_evidence",
+            (
+                "UTC-valid records exist but no host-consistent SET_TIME anchor "
+                "with monotonic observations is available"
+            ),
+            status="INCONCLUSIVE",
+        )
     if missing != 0:
         report.add_issue(
             "utc_mapping_evidence",
@@ -757,12 +823,6 @@ def _verify_timeline(
                 f"{missing} UTC-valid record(s) have no matching host snapshot "
                 "observation"
             ),
-            status="INCONCLUSIVE",
-        )
-    if checked != 0 and not has_time_set:
-        report.add_issue(
-            "utc_anchor_evidence",
-            "UTC-valid records exist but the run has no SET_TIME evidence",
             status="INCONCLUSIVE",
         )
     utc_issues = report.issues[utc_start:]
@@ -776,8 +836,8 @@ def _verify_timeline(
         "utc_mapping",
         utc_status,
         (
-            f"cross-checked {checked} UTC-valid record(s) against host "
-            f"observations; {missing} without matching evidence"
+            f"cross-checked {checked} UTC-valid record(s) against the SET_TIME "
+            f"anchor; {missing} without matching evidence"
         ),
     )
 
