@@ -2,7 +2,7 @@ FreeRTOS kernel source manifest for board A
 ===========================================
 
 Original package:
-  docs/vendor/6，软件资料/14，FreeRTOS学习资料/FreeRTOS源码/FreeRTOSv9.0.0.exe
+  FreeRTOSv9.0.0.exe (vendor FreeRTOS source package; exact file hash below)
   SHA-256: 744ba0090fac468eb4f31a9ca6bcf2e9344eb7684a46554f8b0df0d7b445e34d
 
 Version evidence:
