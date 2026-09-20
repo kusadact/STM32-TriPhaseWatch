@@ -130,6 +130,62 @@ class VerifierTests(unittest.TestCase):
             self.assertEqual(report.exit_code, 0, report.issues)
             self.assertEqual(report.overall, "PASS")
 
+    def test_set_time_between_sample_and_snapshot(self) -> None:
+        # seq3 is sampled before SET_TIME but first observed just after it.
+        # Neither an old-clock nor a new-clock UTC proves segment membership.
+        for shift, expected in ((0, 3), (3600, 3), (7200, 1)):
+            with self.subTest(shift=shift), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir, files_dir = make_valid_fixture(
+                    root, second_set_time=(3, BASE_UTC + 3625)
+                )
+                path = run_dir / "observations.jsonl"
+                observations = [json.loads(line) for line in path.read_text().splitlines()]
+                for observation in observations:
+                    value = observation.get("value", {})
+                    if value.get("requested_utc_seconds") == BASE_UTC + 3625:
+                        value["requested_utc_seconds"] = BASE_UTC + 3620
+                        observation["observed_monotonic_s"] = 120.5
+                    if observation.get("kind") == "snapshot" and value["sequence"] == 3:
+                        observation["observed_monotonic_s"] = 121.0
+                timed = [row for row in observations if "observed_monotonic_s" in row]
+                timed.sort(key=lambda row: row["observed_monotonic_s"])
+                # Untimed config/storage evidence keeps its original position.
+                iterator = iter(timed)
+                observations = [next(iterator) if "observed_monotonic_s" in row else row
+                                for row in observations]
+                _write_jsonl(path, observations)
+                if shift:
+                    def shift_boundary(records):
+                        records[2]["utc_s"] += shift
+                        return records
+                    _mutate_records(run_dir, files_dir, shift_boundary)
+                report = self._verify(root, run_dir, files_dir)
+                self.assertEqual(report.exit_code, expected, report.issues)
+                codes = {issue["code"] for issue in report.issues}
+                self.assertIn("utc_segment_evidence", codes)
+                self.assertNotIn("utc_step", codes)
+                if expected == 1:
+                    self.assertIn("utc_host_mapping", codes)
+                else:
+                    self.assertNotIn("utc_host_mapping", codes)
+
+    def test_set_time_boundary_does_not_hide_later_bad_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, files_dir = make_valid_fixture(
+                root, second_set_time=(3, BASE_UTC + 3625)
+            )
+            def damage_step(records):
+                # Within the new segment and within absolute UTC tolerance,
+                # but inconsistent with the preceding sampling-clock delta.
+                records[5]["utc_s"] += 2
+                return records
+            _mutate_records(run_dir, files_dir, damage_step)
+            report = self._verify(root, run_dir, files_dir)
+            self.assertEqual(report.exit_code, 1, report.issues)
+            self.assertIn("utc_step", {issue["code"] for issue in report.issues})
+
     def test_u16_channel_wrap_passes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

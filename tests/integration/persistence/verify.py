@@ -710,7 +710,10 @@ def _verify_timeline(
 
     # Every successful SET_TIME starts a new anchor segment: the device clock
     # is user-set, so records are compared against the anchor in force at
-    # their observation time instead of the host wall clock.
+    # their sampling-time window instead of the host wall clock. A snapshot
+    # is read after sampling: the existing observation tolerance also bounds
+    # how far before the read the sample may have been generated. Never use
+    # the CSV UTC itself to select a segment.
     anchors: list[tuple[float, int]] = []
     for observation in observations:
         value = observation.get("value")
@@ -730,13 +733,14 @@ def _verify_timeline(
         anchors.append((float(monotonic), requested_utc))
     anchors.sort(key=lambda anchor: anchor[0])
 
-    def active_anchor(monotonic: float) -> tuple[float, int] | None:
-        selected: tuple[float, int] | None = None
-        for anchor in anchors:
-            if anchor[0] > monotonic:
-                break
-            selected = anchor
-        return selected
+    def possible_anchors(monotonic: float) -> list[tuple[float, int]]:
+        earliest = monotonic - UTC_OBSERVATION_TOLERANCE_S
+        return [
+            anchor
+            for index, anchor in enumerate(anchors)
+            if anchor[0] <= monotonic
+            and (index + 1 == len(anchors) or anchors[index + 1][0] > earliest)
+        ]
 
     has_utc_records = any(
         record.utc_valid == 1 for parsed in parsed_files for record in parsed.records
@@ -759,26 +763,46 @@ def _verify_timeline(
                 previous = None
                 previous_anchor = None
                 continue
-            anchor = active_anchor(monotonic)
-            if anchor is None:
+            candidates = possible_anchors(monotonic)
+            if not candidates:
                 unanchored += 1
                 previous = None
                 previous_anchor = None
                 continue
-            expected_utc = anchor[1] + int(monotonic - anchor[0])
+            expected_values = [
+                anchor[1] + int(monotonic - anchor[0]) for anchor in candidates
+            ]
             checked += 1
-            if abs(record.utc_s - expected_utc) > UTC_OBSERVATION_TOLERANCE_S:
+            if all(
+                abs(record.utc_s - expected) > UTC_OBSERVATION_TOLERANCE_S
+                for expected in expected_values
+            ):
                 report.add_issue(
                     "utc_host_mapping",
                     (
                         f"{parsed.relative_path}:{record_index + 2}: utc_s="
-                        f"{record.utc_s} differs from the SET_TIME-anchored "
-                        f"expectation {expected_utc} by more than "
+                        f"{record.utc_s} differs from every possible SET_TIME "
+                        f"expectation {expected_values} by more than "
                         f"{UTC_OBSERVATION_TOLERANCE_S} s"
                     ),
                     path=parsed.relative_path,
                     record_index=record_index,
                 )
+            if len(candidates) > 1:
+                report.add_issue(
+                    "utc_segment_evidence",
+                    "Sampling-time window crosses SET_TIME; snapshot read time "
+                    "cannot establish which clock segment generated this record",
+                    status="INCONCLUSIVE",
+                    path=parsed.relative_path,
+                    record_index=record_index,
+                )
+                # Matching one UTC value does not prove segment membership.
+                # Do not apply a same-segment step assertion across this row.
+                previous = None
+                previous_anchor = None
+                continue
+            anchor = candidates[0]
             # Device-internal consistency only holds inside one SET_TIME
             # segment; a legal re-set makes the step across the boundary
             # meaningless.
