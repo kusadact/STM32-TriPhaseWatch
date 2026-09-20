@@ -76,6 +76,11 @@ class StateError(ModbusClientError):
     exit_code = 7
 
 
+class UnsupportedProtocolError(ModbusClientError):
+    kind = "unsupported_protocol"
+    exit_code = 7
+
+
 class FrameLogError(TransportError):
     kind = "frame_log"
 

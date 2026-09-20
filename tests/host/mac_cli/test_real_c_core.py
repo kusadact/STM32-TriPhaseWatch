@@ -17,9 +17,11 @@ from tools.modbus_client.client import ModbusClient
 from tools.modbus_client.errors import (
     ModbusException,
     TransactionTimeout,
+    UnsupportedProtocolError,
 )
 from tools.modbus_client.protocol import (
     FUNCTION_READ_HOLDING,
+    FUNCTION_READ_INPUT,
     build_read_request,
     build_write_single_request,
 )
@@ -203,6 +205,12 @@ class RealCCoreTests(unittest.TestCase):
 
     def test_python_and_c_crc_standard_vector_match(self) -> None:
         self.assertEqual(self.transport.crc(b"123456789"), 0x4B37)
+
+    def test_p3b_time_commands_reject_real_protocol_1_without_new_writes(self) -> None:
+        with self.assertRaises(UnsupportedProtocolError):
+            self.service.time_set(123)
+        self.assertEqual(len(self.transport.writes), 1)
+        self.assertEqual(self.transport.writes[0][1], FUNCTION_READ_INPUT)
 
     def test_c07_single_dedup_window_and_eviction(self) -> None:
         first = self.service.single(1)

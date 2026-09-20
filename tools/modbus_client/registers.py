@@ -11,6 +11,8 @@ COMMAND_NAMES = {
     3: "START",
     4: "STOP",
     5: "SINGLE",
+    6: "SET_TIME",
+    7: "ARM_START",
 }
 
 COMMAND_RESULT_NAMES = {
@@ -173,6 +175,40 @@ def decode_command_observation(values: Sequence[int]) -> dict[str, Any]:
             ),
             "id": _word32(values[9], values[10]),
         },
+    }
+
+
+def decode_time_status(values: Sequence[int]) -> dict[str, Any]:
+    _require_length(values, 8, "time status")
+    time_status = values[0]
+    schedule_state = values[3]
+    current_words = (values[4], values[5])
+    armed_words = (values[6], values[7])
+    current_raw = _word32(*current_words)
+    armed_raw = _word32(*armed_words)
+    return {
+        "time_status": time_status,
+        "time_status_name": (
+            "VALID"
+            if time_status == 1
+            else "UNCALIBRATED"
+            if time_status == 0
+            else f"UNKNOWN({time_status})"
+        ),
+        "current_utc_seconds": (None if current_raw == 0xFFFFFFFF else current_raw),
+        "current_utc_words": [current_words[0], current_words[1]],
+        "current_utc_valid": current_raw != 0xFFFFFFFF,
+        "schedule_state": schedule_state,
+        "schedule_state_name": (
+            "ARMED"
+            if schedule_state == 1
+            else "NONE"
+            if schedule_state == 0
+            else f"UNKNOWN({schedule_state})"
+        ),
+        "armed_start_utc_seconds": (None if armed_raw == 0xFFFFFFFF else armed_raw),
+        "armed_start_utc_words": [armed_words[0], armed_words[1]],
+        "armed_start_utc_valid": armed_raw != 0xFFFFFFFF,
     }
 
 

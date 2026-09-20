@@ -21,6 +21,7 @@ if __package__:
     )
     from .modbus_client.frame_log import FrameLogger
     from .modbus_client.service import ModbusService
+    from .modbus_client.timeparse import parse_utc_seconds
     from .modbus_client.transport import MacOSTTYTransport, Transport
 else:
     from modbus_client.client import ModbusClient
@@ -32,6 +33,7 @@ else:
     )
     from modbus_client.frame_log import FrameLogger
     from modbus_client.service import ModbusService
+    from modbus_client.timeparse import parse_utc_seconds
     from modbus_client.transport import MacOSTTYTransport, Transport
 
 EXIT_OK = 0
@@ -63,6 +65,13 @@ def _u16(text: str) -> int:
 
 def _u32(text: str) -> int:
     return _unsigned(text, 0xFFFFFFFF, "value")
+
+
+def _utc(text: str) -> int:
+    try:
+        return parse_utc_seconds(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _address(text: str) -> int:
@@ -156,6 +165,14 @@ def build_parser() -> argparse.ArgumentParser:
     single = subparsers.add_parser("single")
     single.add_argument("--id", type=_u32, required=True)
 
+    time_set = subparsers.add_parser("time-set")
+    time_set.add_argument("--utc", type=_utc, required=True)
+
+    subparsers.add_parser("time-status")
+
+    schedule = subparsers.add_parser("schedule")
+    schedule.add_argument("--utc", type=_utc, required=True)
+
     watch = subparsers.add_parser("watch")
     watch.add_argument("--interval", type=_interval, required=True)
     watch_mode = watch.add_mutually_exclusive_group(required=True)
@@ -243,6 +260,12 @@ def _dispatch(
         return service.stop()
     if args.command == "single":
         return service.single(args.id)
+    if args.command == "time-set":
+        return service.time_set(args.utc)
+    if args.command == "time-status":
+        return service.time_status()
+    if args.command == "schedule":
+        return service.schedule(args.utc)
     raise ArgumentError(f"unsupported command {args.command!r}")
 
 
@@ -279,6 +302,9 @@ def _partial_result(error: ModbusClientError) -> dict[str, Any]:
     observation = error.details.get("observation")
     if observation is not None:
         result["observation"] = observation
+    time_status = error.details.get("time_status")
+    if time_status is not None:
+        result["time_status"] = time_status
     return result
 
 
@@ -374,6 +400,25 @@ def _emit_text(payload: dict[str, Any]) -> None:
             f"duplicate={str(result['duplicate']).lower()} "
             f"sequence={snapshot['sequence']} "
             f"valid={str(snapshot['valid']).lower()}"
+        )
+    elif operation == "time-status":
+        print(
+            "time-status: "
+            f"time_status={result['time_status_name']} "
+            f"current_utc_seconds={result['current_utc_seconds']} "
+            f"schedule_state={result['schedule_state_name']} "
+            f"armed_start_utc_seconds={result['armed_start_utc_seconds']}"
+        )
+    elif operation in ("time-set", "schedule"):
+        command = result["command"]["last_command"]
+        time_status = result["time_status"]
+        print(
+            f"{operation}: result={command['result']} "
+            f"requested_utc_seconds={result['requested_utc_seconds']} "
+            f"time_status={time_status['time_status_name']} "
+            f"schedule_state={time_status['schedule_state_name']} "
+            f"armed_start_utc_seconds="
+            f"{time_status['armed_start_utc_seconds']}"
         )
     elif operation == "watch":
         snapshot = result["snapshot"]

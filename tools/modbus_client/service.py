@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from .client import ModbusClient, TransactionResult
-from .errors import ModbusClientError, ModbusException, StateError
+from .errors import (
+    ModbusClientError,
+    ModbusException,
+    StateError,
+    UnsupportedProtocolError,
+)
 from .protocol import (
     FUNCTION_READ_HOLDING,
     FUNCTION_READ_INPUT,
@@ -20,15 +25,21 @@ from .registers import (
     decode_snapshot,
     decode_stats,
     decode_status,
+    decode_time_status,
 )
+from .timeparse import split_u32
 
 COMMAND_APPLY_CONFIG = 1
 COMMAND_SAVE_CONFIG = 2
 COMMAND_START = 3
 COMMAND_STOP = 4
 COMMAND_SINGLE = 5
+COMMAND_SET_TIME = 6
+COMMAND_ARM_START = 7
 
 HOLDING_CONFIG_START = 0x0000
+HOLDING_PENDING_UTC_START = 0x0020
+HOLDING_PENDING_START_UTC_START = 0x0022
 HOLDING_COMMAND = 0x0040
 
 INPUT_STATUS_START = 0x0000
@@ -38,6 +49,9 @@ INPUT_SNAPSHOT_START = 0x0020
 INPUT_SNAPSHOT_COUNT = 15
 INPUT_STATS_START = 0x0060
 INPUT_STATS_COUNT = 26
+INPUT_TIME_STATUS_START = 0x0016
+INPUT_TIME_STATUS_COUNT = 8
+PROTOCOL_TIME_VERSION = 2
 
 
 class ModbusService:
@@ -88,6 +102,85 @@ class ModbusService:
 
     def stats(self) -> dict[str, Any]:
         return decode_stats(self.read_input(INPUT_STATS_START, INPUT_STATS_COUNT))
+
+    def _require_protocol_2(self) -> None:
+        protocol_version = self.identity()["protocol_version"]
+        if protocol_version != PROTOCOL_TIME_VERSION:
+            raise UnsupportedProtocolError(
+                "不支持协议 2 时间功能 "
+                f"(device reports protocol version {protocol_version})",
+                protocol_version=protocol_version,
+            )
+
+    def _read_time_status_v2(self) -> dict[str, Any]:
+        return decode_time_status(
+            self.read_input(INPUT_TIME_STATUS_START, INPUT_TIME_STATUS_COUNT)
+        )
+
+    def time_status(self) -> dict[str, Any]:
+        self._require_protocol_2()
+        return self._read_time_status_v2()
+
+    def time_set(self, utc_seconds: int) -> dict[str, Any]:
+        self._require_protocol_2()
+        words = split_u32(utc_seconds)
+        self.write_multiple(HOLDING_PENDING_UTC_START, words)
+        return self._execute_time_command(
+            COMMAND_SET_TIME,
+            utc_seconds,
+            words,
+        )
+
+    def schedule(self, utc_seconds: int) -> dict[str, Any]:
+        self._require_protocol_2()
+        words = split_u32(utc_seconds)
+        self.write_multiple(HOLDING_PENDING_START_UTC_START, words)
+        return self._execute_time_command(
+            COMMAND_ARM_START,
+            utc_seconds,
+            words,
+        )
+
+    def _execute_time_command(
+        self,
+        command: int,
+        requested_utc_seconds: int,
+        words: tuple[int, int],
+    ) -> dict[str, Any]:
+        try:
+            self.write_single(HOLDING_COMMAND, command)
+        except ModbusException as exc:
+            self._attach_time_observation(exc)
+            raise
+
+        observation = self._observe_after_write()
+        try:
+            time_status = self._read_time_status_v2()
+        except ModbusClientError as exc:
+            exc.details["write_acknowledged"] = True
+            exc.details["observation"] = observation
+            raise
+        try:
+            self._require_command(observation, command, (1,))
+        except StateError as exc:
+            exc.details["time_status"] = time_status
+            raise
+        return {
+            "requested_utc_seconds": requested_utc_seconds,
+            "pending_words": list(words),
+            "command": observation,
+            "time_status": time_status,
+        }
+
+    def _attach_time_observation(self, exc: ModbusException) -> None:
+        try:
+            exc.observation = self._observe_command()
+        except ModbusClientError:
+            exc.observation = None
+        try:
+            exc.details["time_status"] = self._read_time_status_v2()
+        except ModbusClientError:
+            pass
 
     def config(
         self,
