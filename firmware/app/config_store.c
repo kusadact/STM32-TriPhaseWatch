@@ -208,6 +208,7 @@ config_store_load_impl(config_store_t *store, uint8_t *payload,
   uint8_t valid_slot_mask = 0U;
   uint8_t read_error_mask = 0U;
   uint8_t format_error_mask = 0U;
+  uint8_t semantic_error_mask = 0U;
   config_store_status_t read_status = CONFIG_STORE_OK;
 
   if (store == NULL || store->backend.read == NULL ||
@@ -240,12 +241,29 @@ config_store_load_impl(config_store_t *store, uint8_t *payload,
       continue;
     }
 
+    /*
+     * A slot is a candidate only after the physical format and the owning
+     * component's business schema both validate. This preserves the old
+     * generic-store behavior when no validator is installed.
+     */
+    if (store->backend.validate != NULL) {
+      config_store_status_t validate_status =
+          store->backend.validate(store->backend.context,
+                                  records[slot].payload,
+                                  records[slot].payload_length);
+      if (validate_status != CONFIG_STORE_OK) {
+        semantic_error_mask |= config_store_slot_bit(slot);
+        continue;
+      }
+    }
+
     valid_slot_mask |= config_store_slot_bit(slot);
   }
 
   metadata->valid_slot_mask = valid_slot_mask;
   metadata->read_error_mask = read_error_mask;
   metadata->format_error_mask = format_error_mask;
+  metadata->semantic_error_mask = semantic_error_mask;
 
   if ((valid_slot_mask & config_store_slot_bit(0U)) != 0U) {
     selected_slot = 0U;

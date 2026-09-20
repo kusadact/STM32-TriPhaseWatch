@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Iterable
 
 from .client import ModbusClient, TransactionResult
@@ -22,6 +23,7 @@ from .registers import (
     command_result_name,
     decode_command_observation,
     decode_identity,
+    decode_persistence_status,
     decode_snapshot,
     decode_stats,
     decode_status,
@@ -51,7 +53,9 @@ INPUT_STATS_START = 0x0060
 INPUT_STATS_COUNT = 26
 INPUT_TIME_STATUS_START = 0x0016
 INPUT_TIME_STATUS_COUNT = 8
-PROTOCOL_TIME_VERSION = 2
+INPUT_PERSISTENCE_STATUS_START = 0x0080
+INPUT_PERSISTENCE_STATUS_COUNT = 48
+PROTOCOL_PERSISTENCE_VERSION = 3
 
 
 class ModbusService:
@@ -103,11 +107,11 @@ class ModbusService:
     def stats(self) -> dict[str, Any]:
         return decode_stats(self.read_input(INPUT_STATS_START, INPUT_STATS_COUNT))
 
-    def _require_protocol_2(self) -> None:
+    def _require_time_protocol(self) -> None:
         protocol_version = self.identity()["protocol_version"]
-        if protocol_version != PROTOCOL_TIME_VERSION:
+        if protocol_version not in (2, 3):
             raise UnsupportedProtocolError(
-                "不支持协议 2 时间功能 "
+                "不支持协议 2/3 时间功能 "
                 f"(device reports protocol version {protocol_version})",
                 protocol_version=protocol_version,
             )
@@ -118,11 +122,11 @@ class ModbusService:
         )
 
     def time_status(self) -> dict[str, Any]:
-        self._require_protocol_2()
+        self._require_time_protocol()
         return self._read_time_status_v2()
 
     def time_set(self, utc_seconds: int) -> dict[str, Any]:
-        self._require_protocol_2()
+        self._require_time_protocol()
         words = split_u32(utc_seconds)
         self.write_multiple(HOLDING_PENDING_UTC_START, words)
         return self._execute_time_command(
@@ -132,7 +136,7 @@ class ModbusService:
         )
 
     def schedule(self, utc_seconds: int) -> dict[str, Any]:
-        self._require_protocol_2()
+        self._require_time_protocol()
         words = split_u32(utc_seconds)
         self.write_multiple(HOLDING_PENDING_START_UTC_START, words)
         return self._execute_time_command(
@@ -225,7 +229,18 @@ class ModbusService:
         self._require_command(observation, COMMAND_APPLY_CONFIG, (1,))
         return observation
 
-    def save(self) -> dict[str, Any]:
+    def persistence_status(self) -> dict[str, Any]:
+        return decode_persistence_status(
+            self.read_input(
+                INPUT_PERSISTENCE_STATUS_START,
+                INPUT_PERSISTENCE_STATUS_COUNT,
+            )
+        )
+
+    def storage_status(self) -> dict[str, Any]:
+        return self.persistence_status()
+
+    def _legacy_save(self) -> dict[str, Any]:
         try:
             self.write_single(HOLDING_COMMAND, COMMAND_SAVE_CONFIG)
         except ModbusException as exc:
@@ -238,13 +253,148 @@ class ModbusService:
             raise
         raise StateError("SAVE_CONFIG unexpectedly returned a normal write response")
 
+    def save(
+        self,
+        wait_timeout: float = 5.0,
+        command_id: int | None = None,
+    ) -> dict[str, Any]:
+        protocol_version = self.identity()["protocol_version"]
+        if protocol_version not in (1, 2, 3):
+            raise UnsupportedProtocolError(
+                "不支持的设备协议版本 "
+                f"(device reports protocol version {protocol_version})",
+                protocol_version=protocol_version,
+            )
+        if protocol_version != PROTOCOL_PERSISTENCE_VERSION:
+            return self._legacy_save()
+
+        if command_id is None:
+            command_id = time.monotonic_ns() & 0xFFFFFFFF
+            if command_id == 0:
+                command_id = 1
+        if not 0 <= command_id <= 0xFFFFFFFF:
+            raise ValueError("command_id must be in 0..0xFFFFFFFF")
+
+        deadline = time.monotonic() + wait_timeout
+        write_error: ModbusClientError | None = None
+        try:
+            self.write_multiple(
+                HOLDING_COMMAND,
+                [
+                    COMMAND_SAVE_CONFIG,
+                    (command_id >> 16) & 0xFFFF,
+                    command_id & 0xFFFF,
+                ],
+            )
+        except ModbusException as exc:
+            try:
+                exc.observation = self._observe_command()
+            except ModbusClientError:
+                exc.observation = None
+            try:
+                exc.details["persistence_status"] = self.persistence_status()
+            except ModbusClientError:
+                pass
+            raise
+        except ModbusClientError as exc:
+            write_error = exc
+            exc.details["write_may_have_executed"] = True
+
+        last_status: dict[str, Any] | None = None
+        last_read_error: ModbusClientError | None = None
+        while True:
+            try:
+                last_status = self.persistence_status()
+                last_read_error = None
+            except ModbusClientError as exc:
+                last_read_error = exc
+
+            if (
+                last_status is not None
+                and last_status["save_command_id"] == command_id
+                and last_status["save_state"] != 0
+            ):
+                result = {
+                    "accepted": True,
+                    "completed": last_status["save_state"] in (2, 3),
+                    "inconclusive": False,
+                    "command_id": command_id,
+                    "captured_config": {
+                        "period_sec": last_status["captured_period_s"],
+                        "channel_mask": last_status["captured_mask"],
+                        "record_count": last_status["captured_count"],
+                    },
+                    "save_state": last_status["save_state"],
+                    "save_state_name": last_status["save_state_name"],
+                    "save_error": last_status["save_error"],
+                    "save_error_name": last_status["save_error_name"],
+                    "persistence_status": last_status,
+                }
+                if last_status["save_state"] == 2:
+                    return result
+                if last_status["save_state"] == 3:
+                    error = StateError(
+                        "SAVE_CONFIG completed with a persistence failure",
+                        save_result=result,
+                        write_acknowledged=True,
+                    )
+                    raise error
+
+            if time.monotonic() >= deadline:
+                raise StateError(
+                    "SAVE_CONFIG result was not confirmed before the deadline",
+                    save_result={
+                        "accepted": bool(
+                            last_status is not None
+                            and last_status["save_command_id"] == command_id
+                        ),
+                        "completed": False,
+                        "inconclusive": True,
+                        "command_id": command_id,
+                        "save_state": (
+                            last_status["save_state"]
+                            if last_status is not None
+                            else None
+                        ),
+                    },
+                    command_id=command_id,
+                    write_error=(
+                        write_error.as_error()
+                        if write_error is not None
+                        else None
+                    ),
+                    last_status=last_status,
+                    last_read_error=(
+                        last_read_error.as_error()
+                        if last_read_error is not None
+                        else None
+                    ),
+                )
+
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
     def start(self) -> dict[str, Any]:
         self.write_single(HOLDING_COMMAND, COMMAND_START)
         observation = self._observe_after_write()
         self._require_command(observation, COMMAND_START, (1,))
         return observation
 
-    def stop(self) -> dict[str, Any]:
+    def stop(
+        self,
+        wait_timeout: float = 5.0,
+        wait_for_drain: bool = True,
+    ) -> dict[str, Any]:
+        protocol_version = self.identity()["protocol_version"]
+        if protocol_version not in (1, 2, 3):
+            raise UnsupportedProtocolError(
+                "不支持的设备协议版本 "
+                f"(device reports protocol version {protocol_version})",
+                protocol_version=protocol_version,
+            )
+        before_generation = 0
+        if protocol_version == PROTOCOL_PERSISTENCE_VERSION:
+            before_generation = self.persistence_status()["drain_generation"]
+
         self.write_single(HOLDING_COMMAND, COMMAND_STOP)
         observation = self._observe_after_write()
         self._require_command(observation, COMMAND_STOP, (1,))
@@ -254,7 +404,75 @@ class ModbusService:
                 observation=observation,
                 write_acknowledged=True,
             )
-        return observation
+        if protocol_version != PROTOCOL_PERSISTENCE_VERSION:
+            return observation
+        if not wait_for_drain:
+            return {
+                "command": observation,
+                "drain_waited": False,
+                "safe_to_remove": False,
+                "safe_to_remove_condition": (
+                    "storage drain has not completed"
+                ),
+                "persistence_status": None,
+            }
+
+        deadline = time.monotonic() + wait_timeout
+        last_status: dict[str, Any] | None = None
+        while True:
+            try:
+                last_status = self.persistence_status()
+            except ModbusClientError as exc:
+                if time.monotonic() >= deadline:
+                    raise StateError(
+                        "STOP drain result could not be confirmed",
+                        stop_result={
+                            "drain_waited": True,
+                            "safe_to_remove": False,
+                            "inconclusive": True,
+                            "last_read_error": exc.as_error(),
+                        },
+                        write_acknowledged=True,
+                    ) from exc
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+                continue
+
+            if last_status["drain_generation"] > before_generation:
+                if last_status["drain_state"] == 2:
+                    return {
+                        "command": observation,
+                        "drain_waited": True,
+                        "safe_to_remove": True,
+                        "safe_to_remove_condition": (
+                            "until another START, SINGLE, or ARM_START "
+                            "is accepted"
+                        ),
+                        "persistence_status": last_status,
+                    }
+                if last_status["drain_state"] == 3:
+                    raise StateError(
+                        "STOP stopped acquisition but storage drain failed",
+                        stop_result={
+                            "drain_waited": True,
+                            "safe_to_remove": False,
+                            "inconclusive": False,
+                            "persistence_status": last_status,
+                        },
+                        write_acknowledged=True,
+                    )
+
+            if time.monotonic() >= deadline:
+                raise StateError(
+                    "STOP drain did not complete before the CLI deadline",
+                    stop_result={
+                        "drain_waited": True,
+                        "safe_to_remove": False,
+                        "inconclusive": True,
+                        "persistence_status": last_status,
+                    },
+                    write_acknowledged=True,
+                )
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     def single(self, command_id: int) -> dict[str, Any]:
         self.write_multiple(

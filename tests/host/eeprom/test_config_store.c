@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "config_store.h"
+#include "board_a_record_format.h"
 
 #define FAKE_MEMORY_SIZE 256U
 #define CHECK(condition)                                                       \
@@ -282,6 +283,89 @@ static int test_validation_rejects_before_write(void)
   return 0;
 }
 
+static int test_validation_selects_only_valid_business_slot(void)
+{
+  fake_backend_t backend;
+  config_store_t store;
+  config_store_metadata_t metadata;
+  uint8_t valid[] = {0x01U, 0x02U, 0x03U};
+  uint8_t invalid[] = {0xEEU, 0x01U};
+  uint8_t payload[CONFIG_STORE_PAYLOAD_MAX_BYTES];
+
+  fake_reset(&backend);
+  backend.validation_enabled = 1U;
+  backend.rejected_first_byte = 0xEEU;
+  manufacture_slot(&backend, 0U, CONFIG_STORE_FORMAT_VERSION, 1U, valid,
+                   sizeof(valid));
+  manufacture_slot(&backend, 1U, CONFIG_STORE_FORMAT_VERSION, 2U, invalid,
+                   sizeof(invalid));
+
+  CHECK(init_store(&backend, &store) == CONFIG_STORE_OK);
+  CHECK(config_store_load(&store, payload, sizeof(payload), &metadata) ==
+        CONFIG_STORE_OK);
+  CHECK(metadata.selected_slot == 0U);
+  CHECK(metadata.sequence == 1U);
+  CHECK(metadata.payload_length == sizeof(valid));
+  CHECK(memcmp(payload, valid, sizeof(valid)) == 0);
+  CHECK(metadata.valid_slot_mask == (1U << 0U));
+  CHECK((metadata.semantic_error_mask & (1U << 1U)) != 0U);
+
+  manufacture_slot(&backend, 0U, CONFIG_STORE_FORMAT_VERSION, 3U, invalid,
+                   sizeof(invalid));
+  CHECK(init_store(&backend, &store) == CONFIG_STORE_OK);
+  CHECK(config_store_load(&store, payload, sizeof(payload), &metadata) ==
+        CONFIG_STORE_NO_VALID_RECORD);
+  CHECK(metadata.selected_slot == CONFIG_STORE_SLOT_NONE);
+  CHECK(metadata.valid_slot_mask == 0U);
+  CHECK(metadata.semantic_error_mask ==
+        (uint8_t)((1U << 0U) | (1U << 1U)));
+  return 0;
+}
+
+static int test_business_payload_torn_write_preserves_old_slot(void)
+{
+  fake_backend_t backend;
+  config_store_t store;
+  config_store_metadata_t metadata;
+  board_a_persisted_config_t first = {10U, 0x0001U, 0U};
+  board_a_persisted_config_t second = {30U, 0x000FU, 5U};
+  board_a_persisted_config_t decoded;
+  uint8_t first_payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
+  uint8_t second_payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
+  uint8_t payload[CONFIG_STORE_PAYLOAD_MAX_BYTES];
+
+  fake_reset(&backend);
+  backend.validation_enabled = 1U;
+  backend.rejected_first_byte = 0xEEU;
+  CHECK(board_a_config_payload_encode(&first, first_payload,
+                                      sizeof(first_payload)));
+  CHECK(board_a_config_payload_encode(&second, second_payload,
+                                      sizeof(second_payload)));
+
+  CHECK(init_store(&backend, &store) == CONFIG_STORE_OK);
+  CHECK(config_store_load(&store, payload, sizeof(payload), &metadata) ==
+        CONFIG_STORE_NO_VALID_RECORD);
+  CHECK(config_store_save(&store, first_payload, sizeof(first_payload),
+                          &metadata) == CONFIG_STORE_OK);
+  backend.partial_write_mask = 1U << 1U;
+  backend.partial_write_bytes = 20U;
+  CHECK(config_store_save(&store, second_payload, sizeof(second_payload),
+                          &metadata) == CONFIG_STORE_IO_ERROR);
+
+  backend.partial_write_mask = 0U;
+  CHECK(init_store(&backend, &store) == CONFIG_STORE_OK);
+  CHECK(config_store_load(&store, payload, sizeof(payload), &metadata) ==
+        CONFIG_STORE_OK);
+  CHECK(metadata.selected_slot == 0U);
+  CHECK(metadata.sequence == 1U);
+  CHECK(board_a_config_payload_decode(payload, metadata.payload_length,
+                                      &decoded));
+  CHECK(decoded.period_sec == first.period_sec);
+  CHECK(decoded.channel_mask == first.channel_mask);
+  CHECK(decoded.record_count == first.record_count);
+  return 0;
+}
+
 static int test_lock_rejects_concurrent_operation(void)
 {
   fake_backend_t backend;
@@ -481,6 +565,8 @@ int main(void)
   CHECK(test_crc16(crc_vector, 9U) == 0x29B1U);
   CHECK(test_no_valid_record() == 0);
   CHECK(test_validation_rejects_before_write() == 0);
+  CHECK(test_validation_selects_only_valid_business_slot() == 0);
+  CHECK(test_business_payload_torn_write_preserves_old_slot() == 0);
   CHECK(test_lock_rejects_concurrent_operation() == 0);
   CHECK(test_save_load_and_alternation() == 0);
   CHECK(test_torn_write_preserves_previous_slot() == 0);

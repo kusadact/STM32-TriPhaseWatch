@@ -60,6 +60,7 @@ typedef struct {
   uint8_t valid_slot_mask;
   uint8_t read_error_mask;
   uint8_t format_error_mask;
+  uint8_t semantic_error_mask;
 } config_store_metadata_t;
 
 typedef struct {

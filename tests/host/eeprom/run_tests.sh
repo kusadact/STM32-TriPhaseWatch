@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/buscomm-eeprom-tests.XXXXXX")"
+BOARD_A_CORE_DIR="$ROOT_DIR/firmware/board_a/core"
 CC="${CC:-cc}"
 
 cleanup() {
@@ -28,7 +29,9 @@ echo "HOST test_at24c02"
 echo "HOST test_config_store"
 "$CC" "${CFLAGS[@]}" \
   -I"$ROOT_DIR/firmware/app" \
+  -I"$BOARD_A_CORE_DIR" \
   "$ROOT_DIR/firmware/app/config_store.c" \
+  "$BOARD_A_CORE_DIR/board_a_record_format.c" \
   "$SCRIPT_DIR/test_config_store.c" \
   -o "$BUILD_DIR/test_config_store"
 "$BUILD_DIR/test_config_store"

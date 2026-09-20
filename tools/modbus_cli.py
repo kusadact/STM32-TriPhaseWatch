@@ -108,6 +108,20 @@ def _interval(text: str) -> float:
     return value
 
 
+def _wait_timeout(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "wait timeout must be a finite number"
+        ) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            "wait timeout must be finite and positive"
+        )
+    return value
+
+
 def _positive(text: str) -> int:
     value = _unsigned(text, 0x7FFFFFFF, "samples")
     if value == 0:
@@ -130,6 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status")
     subparsers.add_parser("snapshot")
     subparsers.add_parser("stats")
+    subparsers.add_parser(
+        "storage-status",
+        help="read the protocol 3 persistence/queue status block",
+    )
 
     read_holding = subparsers.add_parser("read-holding")
     read_holding.add_argument("--start", type=_u16, required=True)
@@ -158,9 +176,31 @@ def build_parser() -> argparse.ArgumentParser:
     config.add_argument("--count", type=_u16, required=True)
 
     subparsers.add_parser("apply")
-    subparsers.add_parser("save")
+    save = subparsers.add_parser("save")
+    save.add_argument(
+        "--id",
+        type=_u32,
+        help="32-bit SAVE command ID; generated when omitted",
+    )
+    save.add_argument(
+        "--wait-timeout",
+        type=_wait_timeout,
+        default=5.0,
+        help="total CLI wait for the matching terminal state (seconds)",
+    )
     subparsers.add_parser("start")
-    subparsers.add_parser("stop")
+    stop = subparsers.add_parser("stop")
+    stop.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="return after acquisition stops without waiting for SD drain",
+    )
+    stop.add_argument(
+        "--wait-timeout",
+        type=_wait_timeout,
+        default=5.0,
+        help="total CLI wait for the requested drain generation (seconds)",
+    )
 
     single = subparsers.add_parser("single")
     single.add_argument("--id", type=_u32, required=True)
@@ -211,6 +251,8 @@ def _dispatch(
         return service.snapshot()
     if args.command == "stats":
         return service.stats()
+    if args.command == "storage-status":
+        return service.storage_status()
     if args.command == "read-holding":
         values = service.read_holding(args.start, args.count)
         return {
@@ -253,11 +295,17 @@ def _dispatch(
     if args.command == "apply":
         return service.apply()
     if args.command == "save":
-        return service.save()
+        return service.save(
+            wait_timeout=args.wait_timeout,
+            command_id=args.id,
+        )
     if args.command == "start":
         return service.start()
     if args.command == "stop":
-        return service.stop()
+        return service.stop(
+            wait_timeout=args.wait_timeout,
+            wait_for_drain=not args.no_wait,
+        )
     if args.command == "single":
         return service.single(args.id)
     if args.command == "time-set":
@@ -305,6 +353,12 @@ def _partial_result(error: ModbusClientError) -> dict[str, Any]:
     time_status = error.details.get("time_status")
     if time_status is not None:
         result["time_status"] = time_status
+    save_result = error.details.get("save_result")
+    if save_result is not None:
+        result["save_result"] = save_result
+    stop_result = error.details.get("stop_result")
+    if stop_result is not None:
+        result["stop_result"] = stop_result
     return result
 
 
@@ -358,6 +412,21 @@ def _emit_text(payload: dict[str, Any]) -> None:
     elif operation == "stats":
         for key, value in result.items():
             print(f"{key}={value}")
+    elif operation == "storage-status":
+        print(
+            "storage-status: "
+            f"save={result['save_state_name']} "
+            f"save_error={result['save_error_name']} "
+            f"load={result['config_load_state_name']} "
+            f"storage={result['storage_state_name']} "
+            f"storage_error={result['storage_error_name']} "
+            f"queued={result['queued']} "
+            f"generated={result['generated']} "
+            f"synced={result['synced']} "
+            f"dropped={result['dropped']} "
+            f"uncertain={result['uncertain']} "
+            f"drain={result['drain_state_name']}"
+        )
     elif operation in ("read-holding", "read-input"):
         print(
             f"{operation}: start=0x{result['start']:04X} "
@@ -384,12 +453,49 @@ def _emit_text(payload: dict[str, Any]) -> None:
             f"count={result['record_count']} "
             "staged=true readback_matched=true"
         )
-    elif operation in ("apply", "start", "stop"):
+    elif operation in ("apply", "start"):
         command = result["last_command"]
         print(
             f"{operation}: result={command['result']} "
             f"run_state={result['run_state']} "
             f"config_version={result['active_config']['version']}"
+        )
+    elif operation == "stop":
+        if "command" not in result:
+            command = result["last_command"]
+            print(
+                "stop: "
+                f"result={command['result']} "
+                f"run_state={result['run_state']} "
+                f"config_version={result['active_config']['version']}"
+            )
+        else:
+            command = result["command"]["last_command"]
+            persistence = result.get("persistence_status")
+            print(
+                "stop: "
+                f"result={command['result']} "
+                f"run_state={result['command']['run_state']} "
+                f"drain_waited={str(result['drain_waited']).lower()} "
+                f"safe_to_remove={str(result['safe_to_remove']).lower()} "
+                f"condition={result['safe_to_remove_condition']!r}"
+                + (
+                    f" drain_state={persistence['drain_state_name']}"
+                    if persistence is not None
+                    else ""
+                )
+            )
+    elif operation == "save":
+        print(
+            "save: "
+            f"accepted={str(result['accepted']).lower()} "
+            f"completed={str(result['completed']).lower()} "
+            f"command_id={result['command_id']} "
+            f"state={result['save_state_name']} "
+            f"error={result['save_error_name']} "
+            f"captured_period={result['captured_config']['period_sec']} "
+            f"captured_mask=0x{result['captured_config']['channel_mask']:04X} "
+            f"captured_count={result['captured_config']['record_count']}"
         )
     elif operation == "single":
         command = result["command"]["last_command"]

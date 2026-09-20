@@ -132,6 +132,17 @@ static bool runtime_command(board_a_runtime_t *runtime, uint16_t command)
          (memcmp(response, request, request_length) == 0);
 }
 
+static bool runtime_finish_drain(board_a_runtime_t *runtime)
+{
+  board_a_persistence_status_t status;
+
+  return board_a_runtime_persistence_status(runtime, &status) &&
+         (status.drain_state == BOARD_A_DRAIN_PENDING) &&
+         (board_a_runtime_complete_drain(runtime, status.drain_generation,
+                                         1),
+          true);
+}
+
 static bool runtime_submit_single(board_a_runtime_t *runtime, uint32_t id)
 {
   uint8_t request[64];
@@ -403,6 +414,7 @@ static void test_model_commands_and_scheduler(void)
   CHECK(status.records_this_run == 2U);
 
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_STOP));
+  CHECK(runtime_finish_drain(&runtime));
   board_a_runtime_tick(&runtime, 21000000ULL);
   CHECK(board_a_runtime_copy_status(&runtime, &status));
   CHECK(status.sequence == 2U);
@@ -967,7 +979,7 @@ static void test_t06_reset_defaults(void)
   pthread_mutex_destroy(&context.mutex);
 }
 
-/* T07: protocol 2 identity, unchanged 1..5 behavior, and 6/7 acceptance. */
+/* T07: protocol 3 identity, unchanged 1..5 behavior, and 6/7 acceptance. */
 static void test_t07_protocol_version_and_commands(void)
 {
   fake_lock_t context;
@@ -978,22 +990,22 @@ static void test_t07_protocol_version_and_commands(void)
   p3b_runtime_setup(&runtime, &context, 14U);
   CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_PROTOCOL_VERSION,
                          &value) &&
-        (value == 2U));
+        (value == 3U));
 
   /* Protocol 1 command values keep their meanings. */
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_START));
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_START));
   CHECK(runtime_command(&runtime, BOARD_A_COMMAND_STOP));
+  CHECK(runtime_finish_drain(&runtime));
   CHECK(runtime_submit_single(&runtime, 0x00000001U));
   CHECK(runtime_submit_single(&runtime, 0x00000001U));
   CHECK(board_a_runtime_copy_status(&runtime, &status));
   CHECK(status.command_result == BOARD_A_COMMAND_RESULT_DUPLICATE);
 
-  /* SAVE_CONFIG stays unsupported. */
-  CHECK(runtime_command_expect_exception(&runtime, BOARD_A_COMMAND_SAVE_CONFIG,
-                                         0x04U));
+  /* SAVE_CONFIG is accepted into the asynchronous mailbox. */
+  CHECK(runtime_command(&runtime, BOARD_A_COMMAND_SAVE_CONFIG));
   CHECK(board_a_runtime_copy_status(&runtime, &status));
-  CHECK(status.command_result == BOARD_A_COMMAND_RESULT_UNSUPPORTED);
+  CHECK(status.command_result == BOARD_A_COMMAND_RESULT_ACCEPTED);
 
   /* Values outside the supported set are illegal values. */
   CHECK(runtime_command_expect_exception(&runtime, 0U, 0x03U));

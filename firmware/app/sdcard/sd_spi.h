@@ -24,6 +24,17 @@ typedef struct {
   uint32_t sector_count;
 } sd_spi_info_t;
 
+typedef uint32_t (*sd_spi_now_ms_fn)(void *context);
+
+/*
+ * Optional operation deadline. The owner sets this before an SD/FatFs call
+ * chain; sdcard driver polling loops and disk_initialize retries honor it.
+ */
+void sd_spi_set_deadline(sd_spi_now_ms_fn now_ms, void *context,
+                         uint32_t deadline_ms);
+void sd_spi_clear_deadline(void);
+uint8_t sd_spi_deadline_expired(void);
+
 sd_spi_result_t sd_spi_init(sd_spi_info_t *info);
 sd_spi_result_t sd_spi_read_blocks(uint32_t lba, uint8_t *buf, uint32_t count);
 sd_spi_result_t sd_spi_write_blocks(uint32_t lba, const uint8_t *buf, uint32_t count);

@@ -174,7 +174,7 @@ class P3BCliTests(unittest.TestCase):
                 self.assertEqual(code, 7)
                 payload = json.loads(stdout)
                 self.assertEqual(payload["error"]["kind"], "unsupported_protocol")
-                self.assertIn("不支持协议 2 时间功能", payload["error"]["message"])
+                self.assertIn("不支持协议 2/3 时间功能", payload["error"]["message"])
                 self.assertEqual(stderr, "")
                 self.assertEqual(len(transport.writes), 1)
                 self.assertEqual(transport.writes[0][1], FUNCTION_READ_INPUT)

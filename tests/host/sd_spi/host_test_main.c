@@ -23,6 +23,13 @@ static uint8_t pattern[SD_SPI_BLOCK_SIZE];
 
 static unsigned checks_run;
 static unsigned checks_failed;
+static uint32_t fake_now_ms;
+
+static uint32_t fake_now(void *context)
+{
+  (void)context;
+  return fake_now_ms;
+}
 
 static void check(int condition, const char *name)
 {
@@ -72,6 +79,13 @@ int main(void)
 
   memset(pattern, 0xA5, sizeof(pattern));
   memset(&info, 0, sizeof(info));
+
+  fake_now_ms = 1000u;
+  sd_spi_set_deadline(fake_now, NULL, 999u);
+  result = sd_spi_init(&info);
+  check(result == SD_SPI_ERR_TIMEOUT,
+        "an already-expired SD deadline aborts initialization");
+  sd_spi_clear_deadline();
 
   result = sd_spi_init(&info);
   check(result == SD_SPI_OK, "sd_spi_init returns ok on the simulated card");

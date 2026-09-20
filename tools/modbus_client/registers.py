@@ -39,6 +39,63 @@ QUALITY_NAMES = {
     1: "TEST_VALID",
 }
 
+SAVE_STATE_NAMES = {
+    0: "IDLE",
+    1: "PENDING",
+    2: "SUCCESS",
+    3: "FAILED",
+}
+
+SAVE_ERROR_NAMES = {
+    0: "NONE",
+    1: "NO_VALID_RECORD",
+    2: "INVALID_DATA",
+    3: "IO",
+    4: "CONFLICT",
+    5: "VERIFY",
+    6: "NOT_READY",
+    7: "BUSY",
+    8: "TIMEOUT",
+    9: "OTHER",
+}
+
+CONFIG_LOAD_STATE_NAMES = {
+    0: "UNFINISHED",
+    1: "SUCCESS",
+    2: "DEFAULT_NO_RECORD",
+    3: "DEFAULT_ERROR",
+}
+
+STORAGE_STATE_NAMES = {
+    0: "INITIALIZING",
+    1: "READY",
+    2: "UNAVAILABLE",
+    3: "FULL",
+    4: "IO_ERROR",
+    5: "DRAINING",
+    6: "CLOSED",
+}
+
+STORAGE_ERROR_NAMES = {
+    0: "NONE",
+    1: "INIT",
+    2: "MOUNT",
+    3: "CREATE",
+    4: "FULL",
+    5: "WRITE",
+    6: "SYNC",
+    7: "CLOSE",
+    8: "TIMEOUT",
+    9: "NAME_EXHAUSTED",
+}
+
+DRAIN_STATE_NAMES = {
+    0: "NONE",
+    1: "PENDING",
+    2: "DONE",
+    3: "FAILED",
+}
+
 STATS_FIELDS = (
     "rx_frames",
     "crc_errors",
@@ -209,6 +266,68 @@ def decode_time_status(values: Sequence[int]) -> dict[str, Any]:
         "armed_start_utc_seconds": (None if armed_raw == 0xFFFFFFFF else armed_raw),
         "armed_start_utc_words": [armed_words[0], armed_words[1]],
         "armed_start_utc_valid": armed_raw != 0xFFFFFFFF,
+    }
+
+
+def decode_persistence_status(values: Sequence[int]) -> dict[str, Any]:
+    _require_length(values, 48, "persistence status")
+    save_state = values[1]
+    save_error = values[6]
+    config_load_state = values[7]
+    storage_state = values[8]
+    storage_error = values[9]
+    drain_state = values[0x15]
+    return {
+        "contract_revision": values[0],
+        "save_state": save_state,
+        "save_state_name": SAVE_STATE_NAMES.get(
+            save_state,
+            f"UNKNOWN({save_state})",
+        ),
+        "save_command_id": _word32(values[2], values[3]),
+        "save_config_version": _word32(values[4], values[5]),
+        "save_error": save_error,
+        "save_error_name": SAVE_ERROR_NAMES.get(
+            save_error,
+            f"UNKNOWN({save_error})",
+        ),
+        "config_load_state": config_load_state,
+        "config_load_state_name": CONFIG_LOAD_STATE_NAMES.get(
+            config_load_state,
+            f"UNKNOWN({config_load_state})",
+        ),
+        "storage_state": storage_state,
+        "storage_state_name": STORAGE_STATE_NAMES.get(
+            storage_state,
+            f"UNKNOWN({storage_state})",
+        ),
+        "storage_error": storage_error,
+        "storage_error_name": STORAGE_ERROR_NAMES.get(
+            storage_error,
+            f"UNKNOWN({storage_error})",
+        ),
+        "queued": values[10],
+        "queue_high_water": values[11],
+        "generated": _word32(values[12], values[13]),
+        "synced": _word32(values[14], values[15]),
+        "dropped": _word32(values[16], values[17]),
+        "uncertain": _word32(values[18], values[19]),
+        "in_flight": values[20],
+        "drain_state": drain_state,
+        "drain_state_name": DRAIN_STATE_NAMES.get(
+            drain_state,
+            f"UNKNOWN({drain_state})",
+        ),
+        "last_synced_seq": _word32(values[0x16], values[0x17]),
+        "last_synced_file": _word32(values[0x18], values[0x19]),
+        "last_synced_date": _word32(values[0x1A], values[0x1B]),
+        "active_config_version": _word32(values[0x1C], values[0x1D]),
+        "drain_generation": _word32(values[0x1E], values[0x1F]),
+        "storage_errors": _word32(values[0x20], values[0x21]),
+        "load_sequence": _word32(values[0x22], values[0x23]),
+        "captured_period_s": _word32(values[0x24], values[0x25]),
+        "captured_mask": values[0x26],
+        "captured_count": values[0x27],
     }
 
 
