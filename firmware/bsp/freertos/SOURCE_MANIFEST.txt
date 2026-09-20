@@ -1,0 +1,36 @@
+FreeRTOS kernel source manifest for board A
+===========================================
+
+Original package:
+  docs/vendor/6，软件资料/14，FreeRTOS学习资料/FreeRTOS源码/FreeRTOSv9.0.0.exe
+  SHA-256: 744ba0090fac468eb4f31a9ca6bcf2e9344eb7684a46554f8b0df0d7b445e34d
+
+Version evidence:
+  Source/include/task.h:
+    tskKERNEL_VERSION_NUMBER "V9.0.0"
+    tskKERNEL_VERSION_MAJOR 9
+    tskKERNEL_VERSION_MINOR 0
+    tskKERNEL_VERSION_BUILD 0
+
+Selected files and SHA-256:
+  887e74e5828dbf8c11b91b2e5d24e432f2f19b66fc65ca9417469436fe95230f  tasks.c
+  fb175135c28fb86be25177fcc9f681dc22f3a2b1850f9a19b608a15661aa57bb  queue.c
+  c2fc08cedee309c4456c37ddc857b23ee35f842de235db509f65474298da1081  list.c
+  40ef7a6edce069b99031722e7e0030bef363b3d4c03eb734c0b06b8620409f45  portable/GCC/ARM_CM4F/port.c
+  ca3e999ca5962c26eb913cd786a115a4de5a5952b3d44f7ed2b2625999b4b7dd  portable/GCC/ARM_CM4F/portmacro.h
+  e5db05c4e00a1e708ca16404ef1884df7aef51ffd3c91c006dd867abee0836a4  LICENSE.txt
+
+All files under include/ are copied from the same package's
+FreeRTOS/Source/include directory without modification. The complete
+per-file hash list used for this import is stored in the local P3A
+evidence archive as kernel_source/imported_files.sha256.txt.
+
+Heap policy:
+  configSUPPORT_DYNAMIC_ALLOCATION = 0
+  configSUPPORT_STATIC_ALLOCATION = 1
+  No heap_N.c implementation is linked. Tasks, queue, and mutex use
+  application-provided static storage.
+
+Port policy:
+  Only portable/GCC/ARM_CM4F from the same package is used. RVDS/Keil
+  files in the vendor examples are not linked or substituted.

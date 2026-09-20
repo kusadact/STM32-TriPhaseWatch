@@ -27,6 +27,7 @@ typedef struct {
 } modbus_rtu_rx_t;
 
 void modbus_rtu_rx_init(modbus_rtu_rx_t *rx, uint32_t t35_us);
+void modbus_rtu_rx_discard(modbus_rtu_rx_t *rx);
 void modbus_rtu_rx_push(modbus_rtu_rx_t *rx, uint8_t byte, uint32_t now_us);
 void modbus_rtu_rx_poll(modbus_rtu_rx_t *rx, uint32_t now_us);
 bool modbus_rtu_rx_take(modbus_rtu_rx_t *rx, modbus_rtu_frame_t *frame);

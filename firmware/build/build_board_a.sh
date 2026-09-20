@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BSP_DIR="$ROOT_DIR/firmware/bsp"
+FREERTOS_DIR="$BSP_DIR/freertos"
 APP_DIR="$ROOT_DIR/firmware/app"
 BOARD_DIR="$ROOT_DIR/firmware/board_a"
 CORE_DIR="$BOARD_DIR/core"
@@ -31,6 +32,8 @@ INCLUDES=(
   "-I$CORE_DIR"
   "-I$PLATFORM_DIR"
   "-I$APP_DIR"
+  "-I$FREERTOS_DIR/include"
+  "-I$FREERTOS_DIR/portable/GCC/ARM_CM4F"
   "-I$BSP_DIR/CORE"
   "-I$BSP_DIR/USER"
   "-I$BSP_DIR/SYSTEM/delay"
@@ -48,7 +51,7 @@ BSP_CFLAGS=(-Wno-unused-variable -Wno-deprecated -Wno-attributes -Wno-uninitiali
         -Wno-misleading-indentation -Wno-unknown-pragmas -Wno-maybe-uninitialized
         -Wno-unused-but-set-variable -Wno-pointer-compare
         -Wno-format -Wno-return-type -Wno-implicit-int -Wno-implicit-function-declaration)
-LDFLAGS=(${CPUFLAGS[@]} "-T$SCRIPT_DIR/stm32f407.ld"
+LDFLAGS=(${CPUFLAGS[@]} "-L$SCRIPT_DIR" "-T$SCRIPT_DIR/stm32f407_board_a.ld"
          --specs=nano.specs --specs=nosys.specs
          "-Wl,--gc-sections,-Map=$TARGET.map" -Wl,--no-warn-rwx-segments)
 
@@ -62,16 +65,25 @@ sources=(
   "$CORE_DIR/modbus_crc.c"
   "$CORE_DIR/modbus_rtu.c"
   "$CORE_DIR/modbus_rtu_rx.c"
+  "$CORE_DIR/board_a_monotonic.c"
+  "$CORE_DIR/board_a_rx_recovery.c"
+  "$CORE_DIR/board_a_tx.c"
+  "$CORE_DIR/board_a_runtime.c"
   "$CORE_DIR/board_a_log_schedule.c"
   "$CORE_DIR/board_a_model.c"
   "$CORE_DIR/board_a_slave.c"
   "$PLATFORM_DIR/board_a_main.c"
+  "$PLATFORM_DIR/board_a_rtos.c"
+  "$PLATFORM_DIR/board_a_delay_port.c"
+  "$PLATFORM_DIR/board_a_at24c02_port.c"
   "$APP_DIR/debug_uart.c"
-  "$APP_DIR/delay_port.c"
   "$APP_DIR/syscalls.c"
-  "$APP_DIR/at24c02_port.c"
   "$APP_DIR/config_store.c"
   "$APP_DIR/eeprom_config.c"
+  "$FREERTOS_DIR/tasks.c"
+  "$FREERTOS_DIR/queue.c"
+  "$FREERTOS_DIR/list.c"
+  "$FREERTOS_DIR/portable/GCC/ARM_CM4F/port.c"
   "$BSP_DIR/USER/system_stm32f4xx.c"
   "$BSP_DIR/HARDWARE/IIC/soft_i2c.c"
   "$BSP_DIR/HARDWARE/24CXX/at24c02.c"
