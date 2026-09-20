@@ -39,6 +39,7 @@ class FakeDeviceTransport:
         self.dropped = 0
         self.uncertain = 0
         self.drain_state = 0
+        self.drain_generation = 0
         self.last_command = 0
         self.command_result = 0
         self.last_command_id = 0
@@ -158,7 +159,8 @@ class FakeDeviceTransport:
             self.command_result = 1
         elif command == 4:
             self.run_state = 0
-            self.drain_state = 2
+            self._request_drain()
+            self._complete_drain()
             self.command_result = 1
         elif command == 5:
             self._generate_record(2)
@@ -181,6 +183,15 @@ class FakeDeviceTransport:
         self.records_since_start += 1
         if self.finite_count and self.records_this_run >= self.finite_count:
             self.run_state = 0
+            self._request_drain()
+            self._complete_drain()
+
+    def _request_drain(self) -> None:
+        self.drain_generation = (self.drain_generation + 1) & 0xFFFFFFFF
+        self.drain_state = 1
+
+    def _complete_drain(self) -> None:
+        if self.drain_state == 1:
             self.drain_state = 2
 
     def _generate_record(self, trigger: int) -> None:
@@ -279,7 +290,7 @@ class FakeDeviceTransport:
             )
         put32(26, synced_date)
         put32(28, self.active_config_version)
-        put32(30, 1)
+        put32(30, self.drain_generation)
         self.input_registers[0x80:0xB0] = storage
 
     @property
