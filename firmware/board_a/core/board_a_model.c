@@ -3,7 +3,7 @@
 #define BOARD_A_FIRMWARE_MAJOR 1U
 #define BOARD_A_FIRMWARE_MINOR 0U
 #define BOARD_A_FIRMWARE_PATCH 0U
-#define BOARD_A_PROTOCOL_VERSION 1U
+#define BOARD_A_PROTOCOL_VERSION 2U
 
 #define BOARD_A_DEFAULT_PERIOD_SEC 10U
 #define BOARD_A_DEFAULT_CHANNEL_MASK 0x0001U
@@ -30,6 +30,58 @@ static uint16_t channel_count_from_mask(uint16_t mask)
     }
   }
   return count;
+}
+
+static uint32_t current_utc_seconds(const board_a_model_t *model,
+                                    uint64_t now_us)
+{
+  uint64_t elapsed_us;
+  uint64_t current;
+
+  if (!model->time.time_valid) {
+    return BOARD_A_TIME_INVALID_SECONDS;
+  }
+
+  elapsed_us = (now_us > model->time.utc_anchor_us) ?
+      (now_us - model->time.utc_anchor_us) : 0U;
+  current = (uint64_t)model->time.utc_anchor_seconds +
+            (elapsed_us / 1000000ULL);
+  if (current >= (uint64_t)BOARD_A_TIME_INVALID_SECONDS) {
+    /*
+     * Saturate at the highest legal UTC value; the reserved invalid sentinel
+     * must keep meaning "no software UTC" on the wire.
+     */
+    current = (uint64_t)(BOARD_A_TIME_INVALID_SECONDS - 1U);
+  }
+  return (uint32_t)current;
+}
+
+/*
+ * The target second begins exactly (target - anchor) whole seconds after the
+ * anchor instant. The subtraction stays in 64 bits so the anchor's fractional
+ * second is never truncated before the deadline is formed.
+ */
+static bool compute_target_deadline_us(const board_a_model_t *model,
+                                       uint32_t target_seconds,
+                                       uint64_t *deadline_us)
+{
+  uint64_t target = (uint64_t)target_seconds;
+  uint64_t anchor_seconds = (uint64_t)model->time.utc_anchor_seconds;
+  uint64_t delta_seconds;
+  uint64_t delta_us;
+
+  if (target <= anchor_seconds) {
+    return false;
+  }
+
+  delta_seconds = target - anchor_seconds;
+  delta_us = delta_seconds * 1000000ULL;
+  if (delta_us > (UINT64_MAX - model->time.utc_anchor_us)) {
+    return false;
+  }
+
+  *deadline_us = model->time.utc_anchor_us + delta_us;
+  return true;
 }
 
 static bool config_is_valid(const board_a_config_t *config)
@@ -112,8 +164,12 @@ static void remember_single_id(board_a_model_t *model, uint32_t id)
 
 static modbus_result_t execute_command(board_a_model_t *model,
                                        uint16_t command,
-                                       uint32_t command_id)
+                                       uint32_t command_id,
+                                       uint64_t now_us)
 {
+  uint32_t target_seconds;
+  uint64_t deadline_us;
+
   switch (command) {
     case BOARD_A_COMMAND_APPLY_CONFIG:
       if (!config_is_valid(&model->pending_config)) {
@@ -142,6 +198,10 @@ static modbus_result_t execute_command(board_a_model_t *model,
         model->stats.device_faults++;
         return MODBUS_RESULT_DEVICE_FAILURE;
       }
+      /* An explicit start supersedes any waiting scheduled start. */
+      model->time.schedule_armed = false;
+      model->time.schedule_target_seconds = 0U;
+      model->time.schedule_deadline_us = 0U;
       if (model->run_state != BOARD_A_RUN_RUNNING) {
         model->run_state = BOARD_A_RUN_RUNNING;
         model->records_this_run = 0U;
@@ -153,6 +213,9 @@ static modbus_result_t execute_command(board_a_model_t *model,
       return MODBUS_RESULT_OK;
 
     case BOARD_A_COMMAND_STOP:
+      model->time.schedule_armed = false;
+      model->time.schedule_target_seconds = 0U;
+      model->time.schedule_deadline_us = 0U;
       model->run_state = BOARD_A_RUN_STOPPED;
       model->start_pending = false;
       model->next_sample_us = 0U;
@@ -168,6 +231,52 @@ static modbus_result_t execute_command(board_a_model_t *model,
       }
       generate_record(model, BOARD_A_SAMPLE_TRIGGER_SINGLE, 0U);
       remember_single_id(model, command_id);
+      set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
+                         command_id);
+      return MODBUS_RESULT_OK;
+
+    case BOARD_A_COMMAND_SET_TIME:
+      if (model->time.schedule_armed) {
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
+                           command_id);
+        model->stats.device_faults++;
+        return MODBUS_RESULT_DEVICE_FAILURE;
+      }
+      if (model->time.pending_utc_seconds >= BOARD_A_TIME_INVALID_SECONDS) {
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
+                           command_id);
+        return MODBUS_RESULT_ILLEGAL_VALUE;
+      }
+      model->time.time_valid = true;
+      model->time.utc_anchor_seconds = model->time.pending_utc_seconds;
+      model->time.utc_anchor_us = now_us;
+      set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
+                         command_id);
+      return MODBUS_RESULT_OK;
+
+    case BOARD_A_COMMAND_ARM_START:
+      if (!model->time.time_valid ||
+          (model->run_state == BOARD_A_RUN_RUNNING)) {
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
+                           command_id);
+        model->stats.device_faults++;
+        return MODBUS_RESULT_DEVICE_FAILURE;
+      }
+      target_seconds = model->time.pending_start_utc_seconds;
+      if ((target_seconds >= BOARD_A_TIME_INVALID_SECONDS) ||
+          !compute_target_deadline_us(model, target_seconds, &deadline_us) ||
+          (deadline_us <= now_us)) {
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
+                           command_id);
+        return MODBUS_RESULT_ILLEGAL_VALUE;
+      }
+      /*
+       * A new accepted target atomically replaces the latched one; a rejected
+       * target above leaves the previous schedule untouched.
+       */
+      model->time.schedule_armed = true;
+      model->time.schedule_target_seconds = target_seconds;
+      model->time.schedule_deadline_us = deadline_us;
       set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
                          command_id);
       return MODBUS_RESULT_OK;
@@ -194,6 +303,18 @@ static modbus_result_t read_holding_register(const board_a_model_t *model,
     case BOARD_A_HOLDING_CFG_RECORD_COUNT:
       *value = model->pending_config.record_count;
       return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_PENDING_UTC_SECONDS_HI:
+      *value = word_high16(model->time.pending_utc_seconds);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_PENDING_UTC_SECONDS_LO:
+      *value = word_low16(model->time.pending_utc_seconds);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_HI:
+      *value = word_high16(model->time.pending_start_utc_seconds);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_LO:
+      *value = word_low16(model->time.pending_start_utc_seconds);
+      return MODBUS_RESULT_OK;
     case BOARD_A_HOLDING_COMMAND:
       *value = model->command_register;
       return MODBUS_RESULT_OK;
@@ -210,7 +331,8 @@ static modbus_result_t read_holding_register(const board_a_model_t *model,
 
 static modbus_result_t read_input_register(const board_a_model_t *model,
                                            uint16_t address,
-                                           uint16_t *value)
+                                           uint16_t *value,
+                                           uint64_t now_us)
 {
   switch (address) {
     case BOARD_A_INPUT_DEVICE_TYPE:
@@ -274,8 +396,31 @@ static modbus_result_t read_input_register(const board_a_model_t *model,
     case BOARD_A_INPUT_PERSISTENCE_STATUS:
     case BOARD_A_INPUT_STORAGE_STATUS:
     case BOARD_A_INPUT_RTOS_STATUS:
-    case BOARD_A_INPUT_TIME_STATUS:
       *value = BOARD_A_STATUS_UNSUPPORTED;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_TIME_STATUS:
+      *value = model->time.time_valid ?
+          BOARD_A_TIME_STATUS_CALIBRATED : BOARD_A_TIME_STATUS_UNCALIBRATED;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_SCHEDULE_STATE:
+      *value = model->time.schedule_armed ?
+          BOARD_A_SCHEDULE_STATE_WAITING : BOARD_A_SCHEDULE_STATE_NONE;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CURRENT_UTC_SECONDS_HI:
+      *value = word_high16(current_utc_seconds(model, now_us));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_CURRENT_UTC_SECONDS_LO:
+      *value = word_low16(current_utc_seconds(model, now_us));
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ARMED_START_UTC_SECONDS_HI:
+      *value = word_high16(model->time.schedule_armed ?
+                           model->time.schedule_target_seconds :
+                           BOARD_A_TIME_INVALID_SECONDS);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ARMED_START_UTC_SECONDS_LO:
+      *value = word_low16(model->time.schedule_armed ?
+                          model->time.schedule_target_seconds :
+                          BOARD_A_TIME_INVALID_SECONDS);
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_RECORDS_THIS_RUN_HI:
       *value = word_high16(model->records_this_run);
@@ -430,6 +575,16 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->records_this_run = 0U;
   model->next_sample_us = 0U;
   model->start_pending = false;
+  model->time.pending_utc_seconds = 0U;
+  model->time.pending_start_utc_seconds = 0U;
+  model->time.time_valid = false;
+  model->time.utc_anchor_seconds = 0U;
+  model->time.utc_anchor_us = 0U;
+  model->time.schedule_armed = false;
+  model->time.schedule_target_seconds = 0U;
+  model->time.schedule_deadline_us = 0U;
+  model->time.schedule_start_late_us = 0U;
+  model->time.schedule_start_count = 0U;
   model->stats.rx_frames = 0U;
   model->stats.crc_errors = 0U;
   model->stats.address_mismatch = 0U;
@@ -449,7 +604,8 @@ modbus_result_t board_a_model_read_registers(void *context,
                                              modbus_register_space_t space,
                                              uint16_t address,
                                              uint16_t quantity,
-                                             uint16_t *values)
+                                             uint16_t *values,
+                                             uint64_t now_us)
 {
   board_a_model_t *model = (board_a_model_t *)context;
   uint16_t index;
@@ -467,7 +623,7 @@ modbus_result_t board_a_model_read_registers(void *context,
     } else if (space == MODBUS_REGISTER_INPUT) {
       result = read_input_register(model,
                                    (uint16_t)(address + index),
-                                   &values[index]);
+                                   &values[index], now_us);
     } else {
       return MODBUS_RESULT_ILLEGAL_ADDRESS;
     }
@@ -483,7 +639,8 @@ modbus_result_t board_a_model_read_registers(void *context,
 modbus_result_t board_a_model_write_registers(void *context,
                                               uint16_t address,
                                               const uint16_t *values,
-                                              uint16_t quantity)
+                                              uint16_t quantity,
+                                              uint64_t now_us)
 {
   board_a_model_t *model = (board_a_model_t *)context;
   board_a_config_t candidate_config;
@@ -526,6 +683,46 @@ modbus_result_t board_a_model_write_registers(void *context,
     return MODBUS_RESULT_OK;
   }
 
+  if ((address >= BOARD_A_HOLDING_PENDING_UTC_SECONDS_HI) &&
+      (address <= BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_LO)) {
+    uint32_t pending_utc = model->time.pending_utc_seconds;
+    uint32_t pending_start = model->time.pending_start_utc_seconds;
+
+    if ((uint32_t)address + quantity >
+        (uint32_t)BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_LO + 1U) {
+      return MODBUS_RESULT_ILLEGAL_ADDRESS;
+    }
+    for (index = 0U; index < quantity; ++index) {
+      switch (address + index) {
+        case BOARD_A_HOLDING_PENDING_UTC_SECONDS_HI:
+          pending_utc = (pending_utc & 0x0000FFFFU) |
+                        ((uint32_t)values[index] << 16U);
+          break;
+        case BOARD_A_HOLDING_PENDING_UTC_SECONDS_LO:
+          pending_utc = (pending_utc & 0xFFFF0000U) |
+                        (uint32_t)values[index];
+          break;
+        case BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_HI:
+          pending_start = (pending_start & 0x0000FFFFU) |
+                          ((uint32_t)values[index] << 16U);
+          break;
+        case BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_LO:
+          pending_start = (pending_start & 0xFFFF0000U) |
+                          (uint32_t)values[index];
+          break;
+        default:
+          return MODBUS_RESULT_ILLEGAL_ADDRESS;
+      }
+    }
+    if ((pending_utc == BOARD_A_TIME_INVALID_SECONDS) ||
+        (pending_start == BOARD_A_TIME_INVALID_SECONDS)) {
+      return MODBUS_RESULT_ILLEGAL_VALUE;
+    }
+    model->time.pending_utc_seconds = pending_utc;
+    model->time.pending_start_utc_seconds = pending_start;
+    return MODBUS_RESULT_OK;
+  }
+
   if ((address < BOARD_A_HOLDING_COMMAND) ||
       (address >
        (uint16_t)(BOARD_A_HOLDING_COMMAND_ID_LO + 1U))) {
@@ -559,7 +756,7 @@ modbus_result_t board_a_model_write_registers(void *context,
 
   if (writes_command &&
       ((command_register < BOARD_A_COMMAND_APPLY_CONFIG) ||
-       (command_register > BOARD_A_COMMAND_SINGLE))) {
+       (command_register > BOARD_A_COMMAND_ARM_START))) {
     return MODBUS_RESULT_ILLEGAL_VALUE;
   }
 
@@ -577,7 +774,7 @@ modbus_result_t board_a_model_write_registers(void *context,
   model->command_id_lo = command_id_lo;
 
   if (writes_command) {
-    return execute_command(model, command_register, command_id);
+    return execute_command(model, command_register, command_id, now_us);
   }
   return MODBUS_RESULT_OK;
 }
@@ -587,7 +784,38 @@ void board_a_model_tick(board_a_model_t *model, uint64_t now_us)
   uint64_t period_us;
   uint64_t missed;
 
-  if ((model == NULL) || (model->run_state != BOARD_A_RUN_RUNNING)) {
+  if (model == NULL) {
+    return;
+  }
+
+  if (model->time.schedule_armed &&
+      (now_us >= model->time.schedule_deadline_us)) {
+    uint64_t late_us = now_us - model->time.schedule_deadline_us;
+
+    if (late_us > (uint64_t)UINT32_MAX) {
+      late_us = (uint64_t)UINT32_MAX;
+    }
+    if ((uint32_t)late_us > model->time.schedule_start_late_us) {
+      model->time.schedule_start_late_us = (uint32_t)late_us;
+    }
+    model->time.schedule_start_count++;
+    /*
+     * The wake that crosses the target starts the run exactly once with the
+     * active configuration at that instant. Clearing the schedule first keeps
+     * later wakes from replaying missed periods.
+     */
+    model->time.schedule_armed = false;
+    model->time.schedule_target_seconds = 0U;
+    model->time.schedule_deadline_us = 0U;
+    if (model->active_config.valid) {
+      model->run_state = BOARD_A_RUN_RUNNING;
+      model->records_this_run = 0U;
+      model->next_sample_us = 0U;
+      model->start_pending = true;
+    }
+  }
+
+  if (model->run_state != BOARD_A_RUN_RUNNING) {
     return;
   }
 

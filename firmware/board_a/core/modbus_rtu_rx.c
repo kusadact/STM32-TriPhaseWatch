@@ -58,6 +58,14 @@ void modbus_rtu_rx_init(modbus_rtu_rx_t *rx, uint32_t t35_us)
   rx->ready_overruns = 0U;
 }
 
+void modbus_rtu_rx_discard(modbus_rtu_rx_t *rx)
+{
+  rx->active_length = 0U;
+  rx->active_overflowed = false;
+  rx->ready_length = 0U;
+  rx->ready_valid = false;
+}
+
 void modbus_rtu_rx_push(modbus_rtu_rx_t *rx, uint8_t byte, uint32_t now_us)
 {
   if (gap_elapsed(rx, now_us)) {

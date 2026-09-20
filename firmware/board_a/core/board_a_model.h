@@ -14,11 +14,16 @@
 #define BOARD_A_CHANNEL_MASK_MIN 0x0001U
 #define BOARD_A_CHANNEL_MASK_MAX 0x000FU
 #define BOARD_A_SINGLE_DEDUP_CAPACITY 16U
+#define BOARD_A_TIME_INVALID_SECONDS 0xFFFFFFFFU
 
 enum {
   BOARD_A_HOLDING_CFG_PERIOD_SEC = 0x0000,
   BOARD_A_HOLDING_CFG_CHANNEL_MASK = 0x0001,
   BOARD_A_HOLDING_CFG_RECORD_COUNT = 0x0002,
+  BOARD_A_HOLDING_PENDING_UTC_SECONDS_HI = 0x0020,
+  BOARD_A_HOLDING_PENDING_UTC_SECONDS_LO = 0x0021,
+  BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_HI = 0x0022,
+  BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_LO = 0x0023,
   BOARD_A_HOLDING_COMMAND = 0x0040,
   BOARD_A_HOLDING_COMMAND_ID_HI = 0x0041,
   BOARD_A_HOLDING_COMMAND_ID_LO = 0x0042
@@ -49,7 +54,12 @@ enum {
   BOARD_A_INPUT_RTOS_STATUS = 0x0015,
   BOARD_A_INPUT_TIME_STATUS = 0x0016,
   BOARD_A_INPUT_RECORDS_THIS_RUN_HI = 0x0017,
-  BOARD_A_INPUT_RECORDS_THIS_RUN_LO = 0x0018
+  BOARD_A_INPUT_RECORDS_THIS_RUN_LO = 0x0018,
+  BOARD_A_INPUT_SCHEDULE_STATE = 0x0019,
+  BOARD_A_INPUT_CURRENT_UTC_SECONDS_HI = 0x001A,
+  BOARD_A_INPUT_CURRENT_UTC_SECONDS_LO = 0x001B,
+  BOARD_A_INPUT_ARMED_START_UTC_SECONDS_HI = 0x001C,
+  BOARD_A_INPUT_ARMED_START_UTC_SECONDS_LO = 0x001D
 };
 
 enum {
@@ -105,7 +115,9 @@ typedef enum {
   BOARD_A_COMMAND_SAVE_CONFIG = 2,
   BOARD_A_COMMAND_START = 3,
   BOARD_A_COMMAND_STOP = 4,
-  BOARD_A_COMMAND_SINGLE = 5
+  BOARD_A_COMMAND_SINGLE = 5,
+  BOARD_A_COMMAND_SET_TIME = 6,
+  BOARD_A_COMMAND_ARM_START = 7
 } board_a_command_t;
 
 typedef enum {
@@ -137,6 +149,16 @@ enum {
 };
 
 enum {
+  BOARD_A_TIME_STATUS_UNCALIBRATED = 0,
+  BOARD_A_TIME_STATUS_CALIBRATED = 1
+};
+
+enum {
+  BOARD_A_SCHEDULE_STATE_NONE = 0,
+  BOARD_A_SCHEDULE_STATE_WAITING = 1
+};
+
+enum {
   BOARD_A_QUALITY_UNAVAILABLE = 0,
   BOARD_A_QUALITY_TEST_VALID = 1
 };
@@ -156,6 +178,25 @@ typedef struct {
   uint32_t version;
   board_a_config_t config;
 } board_a_active_config_t;
+
+/*
+ * Software UTC staging, calibration anchor, and one-shot scheduled start.
+ * The anchor pairs the UTC second written by SET_TIME with the monotonic
+ * microsecond instant of that command; scheduling derives target deadlines
+ * from the pair without truncating to whole seconds.
+ */
+typedef struct {
+  uint32_t pending_utc_seconds;
+  uint32_t pending_start_utc_seconds;
+  bool time_valid;
+  uint32_t utc_anchor_seconds;
+  uint64_t utc_anchor_us;
+  bool schedule_armed;
+  uint32_t schedule_target_seconds;
+  uint64_t schedule_deadline_us;
+  uint32_t schedule_start_late_us;
+  uint32_t schedule_start_count;
+} board_a_time_state_t;
 
 typedef struct {
   bool valid;
@@ -205,6 +246,7 @@ typedef struct {
   uint32_t records_this_run;
   uint64_t next_sample_us;
   bool start_pending;
+  board_a_time_state_t time;
   board_a_model_stats_t stats;
 } board_a_model_t;
 
@@ -214,12 +256,14 @@ modbus_result_t board_a_model_read_registers(void *context,
                                              modbus_register_space_t space,
                                              uint16_t address,
                                              uint16_t quantity,
-                                             uint16_t *values);
+                                             uint16_t *values,
+                                             uint64_t now_us);
 
 modbus_result_t board_a_model_write_registers(void *context,
                                               uint16_t address,
                                               const uint16_t *values,
-                                              uint16_t quantity);
+                                              uint16_t quantity,
+                                              uint64_t now_us);
 
 void board_a_model_tick(board_a_model_t *model, uint64_t now_us);
 

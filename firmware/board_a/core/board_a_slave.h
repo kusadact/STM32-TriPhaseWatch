@@ -11,6 +11,12 @@ typedef struct {
   board_a_model_t model;
   modbus_rtu_rx_t receiver;
   modbus_rtu_server_t server;
+  /*
+   * Monotonic microsecond instant of the frame being processed. The owner
+   * refreshes it before polling; the model binds SET_TIME/ARM_START and
+   * evaluates CURRENT_UTC_SECONDS against it.
+   */
+  uint64_t frame_now_us;
 } board_a_slave_t;
 
 void board_a_slave_init(board_a_slave_t *slave, uint32_t session_id);

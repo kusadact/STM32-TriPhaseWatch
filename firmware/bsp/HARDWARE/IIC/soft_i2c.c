@@ -14,6 +14,11 @@
 static volatile uint8_t soft_i2c_transaction_active;
 static volatile uint8_t soft_i2c_initialized;
 
+__attribute__((weak)) bool soft_i2c_platform_ready(void)
+{
+  return (SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) != 0U;
+}
+
 static soft_i2c_result_t soft_i2c_enter(void)
 {
   uint32_t primask = __get_PRIMASK();
@@ -97,7 +102,7 @@ soft_i2c_result_t soft_i2c_init(void)
   GPIO_InitTypeDef gpio = {0};
   soft_i2c_result_t result;
 
-  if ((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0U) {
+  if (!soft_i2c_platform_ready()) {
     return SOFT_I2C_ERROR_NOT_READY;
   }
 
