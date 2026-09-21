@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../sensors/sensor_manager.h"
 #include "board_a_persistence.h"
 #include "modbus_rtu.h"
 
@@ -153,6 +154,37 @@ enum {
   BOARD_A_INPUT_CAPTURED_COUNT = 0x00A7
 };
 
+/*
+ * DHT11 extension block. It is intentionally separate from the frozen
+ * protocol-3 persistence block and keeps per-sensor quality/error/time.
+ */
+enum {
+  BOARD_A_INPUT_DHT11_CONTRACT_REVISION = 0x00B0,
+  BOARD_A_INPUT_DHT11_SOURCE_TYPE = 0x00B1,
+  BOARD_A_INPUT_DHT11_VALID_MASK = 0x00B2,
+  BOARD_A_INPUT_DHT11_SAMPLE_ID_HI = 0x00B3,
+  BOARD_A_INPUT_DHT11_SAMPLE_ID_LO = 0x00B4,
+  BOARD_A_INPUT_DHT11_TEMPERATURE_0 = 0x00B5,
+  BOARD_A_INPUT_DHT11_TEMPERATURE_1 = 0x00B6,
+  BOARD_A_INPUT_DHT11_TEMPERATURE_2 = 0x00B7,
+  BOARD_A_INPUT_DHT11_HUMIDITY_0 = 0x00B8,
+  BOARD_A_INPUT_DHT11_HUMIDITY_1 = 0x00B9,
+  BOARD_A_INPUT_DHT11_HUMIDITY_2 = 0x00BA,
+  BOARD_A_INPUT_DHT11_QUALITY_0 = 0x00BB,
+  BOARD_A_INPUT_DHT11_QUALITY_1 = 0x00BC,
+  BOARD_A_INPUT_DHT11_QUALITY_2 = 0x00BD,
+  BOARD_A_INPUT_DHT11_ERROR_0 = 0x00BE,
+  BOARD_A_INPUT_DHT11_ERROR_1 = 0x00BF,
+  BOARD_A_INPUT_DHT11_ERROR_2 = 0x00C0,
+  BOARD_A_INPUT_DHT11_SAMPLE_TIME_0_HI = 0x00C1,
+  BOARD_A_INPUT_DHT11_SAMPLE_TIME_0_LO = 0x00C2,
+  BOARD_A_INPUT_DHT11_SAMPLE_TIME_1_HI = 0x00C3,
+  BOARD_A_INPUT_DHT11_SAMPLE_TIME_1_LO = 0x00C4,
+  BOARD_A_INPUT_DHT11_SAMPLE_TIME_2_HI = 0x00C5,
+  BOARD_A_INPUT_DHT11_SAMPLE_TIME_2_LO = 0x00C6,
+  BOARD_A_INPUT_DHT11_SENSOR_TYPE = 0x00C7
+};
+
 typedef enum {
   BOARD_A_COMMAND_NONE = 0,
   BOARD_A_COMMAND_APPLY_CONFIG = 1,
@@ -184,7 +216,8 @@ typedef enum {
 } board_a_sample_trigger_t;
 
 enum {
-  BOARD_A_DATA_SOURCE_TEST = 1
+  BOARD_A_DATA_SOURCE_TEST = 1,
+  BOARD_A_DATA_SOURCE_REAL_DHT11 = 2
 };
 
 enum {
@@ -203,11 +236,7 @@ enum {
 };
 
 enum {
-  BOARD_A_QUALITY_UNAVAILABLE = 0,
-  BOARD_A_QUALITY_TEST_VALID = 1
-};
-
-enum {
+  BOARD_A_UNIT_NONE = 0,
   BOARD_A_UNIT_COUNT = 1
 };
 
@@ -246,10 +275,12 @@ typedef struct {
   bool valid;
   uint32_t sequence;
   uint64_t sample_time_us;
+  uint16_t source;
   uint16_t channel_count;
   uint16_t channel_values[BOARD_A_MAX_CHANNELS];
   uint16_t channel_quality[BOARD_A_MAX_CHANNELS];
   uint16_t trigger;
+  board_a_sensor_snapshot_t sensors;
 } board_a_snapshot_t;
 
 typedef struct {
@@ -271,7 +302,9 @@ typedef struct {
 typedef struct {
   board_a_config_t pending_config;
   board_a_active_config_t active_config;
+  board_a_sensor_snapshot_t pending_sensor_snapshot;
   board_a_snapshot_t snapshot;
+  uint16_t data_source;
   board_a_run_state_t run_state;
   uint32_t session_id;
   uint16_t command_register;
@@ -296,6 +329,13 @@ typedef struct {
 } board_a_model_t;
 
 void board_a_model_init(board_a_model_t *model, uint32_t session_id);
+
+bool board_a_model_set_data_source(board_a_model_t *model,
+                                   uint16_t source);
+
+void board_a_model_publish_sensor_snapshot(
+    board_a_model_t *model,
+    const board_a_sensor_snapshot_t *snapshot);
 
 modbus_result_t board_a_model_read_registers(void *context,
                                              modbus_register_space_t space,

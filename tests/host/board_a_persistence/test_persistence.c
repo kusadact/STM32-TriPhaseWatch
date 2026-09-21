@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "board_a_model.h"
 #include "board_a_persistence.h"
 #include "board_a_record_format.h"
 #include "board_a_storage_engine.h"
@@ -121,7 +122,13 @@ static int test_record_csv_and_identity(void)
   static const char expected_header[] =
       "schema,session,seq,trigger,planned_ms,actual_ms,utc_valid,utc_s,"
       "config_version,period_s,mask,sample_count,source,v0,v1,v2,v3,u0,u1,"
-      "u2,u3,q0,q1,q2,q3,file_id,file_date,reserved\n";
+      "u2,u3,q0,q1,q2,q3,file_id,file_date,reserved,dht_valid_mask,"
+      "dht_sample_id,"
+      "dht0_temp_x10,dht1_temp_x10,dht2_temp_x10,"
+      "dht0_humidity_x10,dht1_humidity_x10,dht2_humidity_x10,"
+      "dht0_quality,dht1_quality,dht2_quality,"
+      "dht0_error,dht1_error,dht2_error,"
+      "dht0_sample_ms,dht1_sample_ms,dht2_sample_ms\n";
 
   CHECK(strcmp(board_a_record_format_csv_header(), expected_header) == 0);
   CHECK(board_a_record_format_encode_csv(&record, buffer, sizeof(buffer),
@@ -134,7 +141,7 @@ static int test_record_csv_and_identity(void)
       commas++;
     }
   }
-  CHECK(commas == 27U);
+  CHECK(commas == 44U);
   CHECK(memchr(buffer, '\r', length) == NULL);
   CHECK(!board_a_record_format_encode_csv(&record, small, length - 1U,
                                           &index));
@@ -174,6 +181,15 @@ static int test_maximum_csv_record(void)
   for (channel = 0U; channel < BOARD_A_RECORD_CHANNEL_COUNT; channel++) {
     record.units[channel] = 1U;
     record.qualities[channel] = 1U;
+  }
+  record.dht_valid_mask = 0U;
+  record.dht_sample_id = 0U;
+  for (channel = 0U; channel < BOARD_A_RECORD_DHT11_COUNT; channel++) {
+    record.dht_temperature_x10[channel] = 0U;
+    record.dht_humidity_x10[channel] = 0U;
+    record.dht_quality[channel] = 0U;
+    record.dht_error[channel] = 0U;
+    record.dht_sample_time_ms[channel] = 0U;
   }
   CHECK(board_a_record_format_is_valid(&record));
   CHECK(board_a_record_format_encode_csv(&record, buffer, sizeof(buffer),
@@ -675,6 +691,65 @@ static int test_record_path_capacity_boundaries(void)
   return 0;
 }
 
+static int test_dht11_csv_payload(void)
+{
+  fake_storage_io_t fake;
+  board_a_storage_engine_t engine;
+  board_a_storage_io_ops_t ops = FAKE_STORAGE_OPS;
+  board_a_record_format_record_t record = make_record(9U, 1U, 1709164800U);
+  uint8_t buffer[BOARD_A_RECORD_CSV_MAX_BYTES + 1U];
+  size_t length = 0U;
+  uint8_t channel;
+
+  record.source = BOARD_A_DATA_SOURCE_REAL_DHT11;
+  for (channel = 0U; channel < BOARD_A_RECORD_CHANNEL_COUNT; ++channel) {
+    record.values[channel] = 0U;
+    record.units[channel] = BOARD_A_UNIT_COUNT;
+    record.qualities[channel] = BOARD_A_QUALITY_UNAVAILABLE;
+  }
+  record.dht_valid_mask = 0x0007U;
+  record.dht_sample_id = 42U;
+  record.dht_temperature_x10[0] = 230U;
+  record.dht_temperature_x10[1] = 240U;
+  record.dht_temperature_x10[2] = 250U;
+  record.dht_humidity_x10[0] = 450U;
+  record.dht_humidity_x10[1] = 550U;
+  record.dht_humidity_x10[2] = 650U;
+  record.dht_quality[0] = BOARD_A_QUALITY_OK;
+  record.dht_quality[1] = BOARD_A_QUALITY_STALE;
+  record.dht_quality[2] = BOARD_A_QUALITY_OK;
+  record.dht_error[1] = BOARD_A_SENSOR_ERROR_CHECKSUM;
+  record.dht_sample_time_ms[0] = 1000U;
+  record.dht_sample_time_ms[1] = 2000U;
+  record.dht_sample_time_ms[2] = 3000U;
+
+  CHECK(board_a_record_format_is_valid(&record));
+  CHECK(board_a_record_format_encode_csv(&record, buffer,
+                                         sizeof(buffer) - 1U, &length));
+  buffer[length] = 0U;
+  CHECK(buffer[0] == (uint8_t)'2');
+  CHECK(strstr((const char *)buffer,
+               ",7,42,230,240,250,450,550,650,1,5,1,0,3,0,"
+               "1000,2000,3000\n") != NULL);
+
+  fake_storage_init(&fake);
+  ops.context = &fake;
+  board_a_storage_engine_init(&engine);
+  CHECK(board_a_storage_engine_probe(&engine, &ops, 2000U));
+  CHECK(board_a_storage_engine_process(&engine, &ops, &record, 2000U) ==
+        BOARD_A_STORAGE_RECORD_SYNCED);
+  CHECK(fake.last_length > 0U);
+  CHECK(fake.last_length < sizeof(fake.bytes));
+  fake.bytes[fake.last_length] = 0U;
+  CHECK(strstr((const char *)fake.bytes,
+               ",7,42,230,240,250,450,550,650,1,5,1,0,3,0,"
+               "1000,2000,3000\n") != NULL);
+
+  record.dht_valid_mask = 0U;
+  CHECK(!board_a_record_format_is_valid(&record));
+  return 0;
+}
+
 int main(void)
 {
   CHECK(test_config_payload_codec() == 0);
@@ -689,6 +764,7 @@ int main(void)
   CHECK(test_storage_engine_name_batch_and_deadline() == 0);
   CHECK(test_queue_requeue_when_full_keeps_old_record() == 0);
   CHECK(test_record_path_capacity_boundaries() == 0);
+  CHECK(test_dht11_csv_payload() == 0);
   puts("PASS test_persistence");
   return 0;
 }

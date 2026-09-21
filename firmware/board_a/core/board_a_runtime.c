@@ -25,6 +25,30 @@ void board_a_runtime_init(board_a_runtime_t *runtime,
   runtime->context = context;
 }
 
+bool board_a_runtime_set_data_source(board_a_runtime_t *runtime,
+                                     uint16_t source)
+{
+  bool updated = false;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  updated = board_a_model_set_data_source(&runtime->slave.model, source);
+  runtime_unlock(runtime);
+  return updated;
+}
+
+void board_a_runtime_publish_sensor_snapshot(
+    board_a_runtime_t *runtime,
+    const board_a_sensor_snapshot_t *snapshot)
+{
+  if ((snapshot == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_publish_sensor_snapshot(&runtime->slave.model, snapshot);
+  runtime_unlock(runtime);
+}
+
 void board_a_runtime_push_byte(board_a_runtime_t *runtime,
                                uint8_t byte,
                                uint32_t now_us)
@@ -108,6 +132,7 @@ bool board_a_runtime_copy_status(board_a_runtime_t *runtime,
   }
 
   status->run_state = (uint16_t)runtime->slave.model.run_state;
+  status->data_source = runtime->slave.model.data_source;
   status->last_command = runtime->slave.model.last_command;
   status->command_result = runtime->slave.model.command_result;
   status->last_command_id = runtime->slave.model.last_command_id;

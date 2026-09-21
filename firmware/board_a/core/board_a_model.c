@@ -10,6 +10,7 @@
 #define BOARD_A_DEFAULT_PERIOD_SEC 10U
 #define BOARD_A_DEFAULT_CHANNEL_MASK 0x0001U
 #define BOARD_A_DEFAULT_RECORD_COUNT 0U
+#define BOARD_A_DHT11_CONTRACT_REVISION 1U
 
 static uint16_t word_low16(uint32_t value)
 {
@@ -99,6 +100,24 @@ static bool config_is_valid(const board_a_config_t *config)
   return true;
 }
 
+static bool data_source_is_valid(uint16_t source)
+{
+  return (source == BOARD_A_DATA_SOURCE_TEST) ||
+      (source == BOARD_A_DATA_SOURCE_REAL_DHT11);
+}
+
+static void reset_sensor_snapshot(board_a_sensor_snapshot_t *snapshot)
+{
+  uint8_t index;
+
+  memset(snapshot, 0, sizeof(*snapshot));
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    snapshot->sensors[index].sensor_id = index;
+    snapshot->sensors[index].sensor_type = BOARD_A_SENSOR_TYPE_DHT11;
+    snapshot->sensors[index].quality = BOARD_A_QUALITY_NOT_PRESENT;
+  }
+}
+
 static void generate_record(board_a_model_t *model,
                             board_a_sample_trigger_t trigger,
                             uint64_t planned_us, uint64_t now_us)
@@ -110,25 +129,38 @@ static void generate_record(board_a_model_t *model,
   model->snapshot.valid = true;
   model->snapshot.sequence++;
   model->snapshot.sample_time_us = now_us;
+  model->snapshot.source = model->data_source;
   model->snapshot.trigger = (uint16_t)trigger;
   model->snapshot.channel_count =
       channel_count_from_mask(model->active_config.config.channel_mask);
 
-  /*
-   * TEST data is deterministic and intentionally not tied to a real sensor.
-   * Counts wrap naturally at 16 bits; the record sequence remains the identity.
-   */
-  for (channel = 0U; channel < BOARD_A_MAX_CHANNELS; ++channel) {
-    if ((model->active_config.config.channel_mask &
-         (uint16_t)(1U << channel)) != 0U) {
-      model->snapshot.channel_values[channel] =
-          (uint16_t)((model->snapshot.sequence * 10U) + channel);
-      model->snapshot.channel_quality[channel] =
-          BOARD_A_QUALITY_TEST_VALID;
-    } else {
+  if (model->data_source == BOARD_A_DATA_SOURCE_REAL_DHT11) {
+    model->snapshot.sensors = model->pending_sensor_snapshot;
+    for (channel = 0U; channel < BOARD_A_MAX_CHANNELS; ++channel) {
       model->snapshot.channel_values[channel] = 0U;
       model->snapshot.channel_quality[channel] =
           BOARD_A_QUALITY_UNAVAILABLE;
+    }
+  } else {
+    /*
+     * TEST data is deterministic and intentionally not tied to a real
+     * sensor. Counts wrap naturally at 16 bits; the sequence remains the
+     * record identity.
+     */
+    reset_sensor_snapshot(&model->snapshot.sensors);
+    model->snapshot.sensors.sample_id = model->snapshot.sequence;
+    for (channel = 0U; channel < BOARD_A_MAX_CHANNELS; ++channel) {
+      if ((model->active_config.config.channel_mask &
+           (uint16_t)(1U << channel)) != 0U) {
+        model->snapshot.channel_values[channel] =
+            (uint16_t)((model->snapshot.sequence * 10U) + channel);
+        model->snapshot.channel_quality[channel] =
+            BOARD_A_QUALITY_TEST_VALID;
+      } else {
+        model->snapshot.channel_values[channel] = 0U;
+        model->snapshot.channel_quality[channel] =
+            BOARD_A_QUALITY_UNAVAILABLE;
+      }
     }
   }
 
@@ -148,11 +180,27 @@ static void generate_record(board_a_model_t *model,
   record.period_sec = model->active_config.config.period_sec;
   record.channel_mask = model->active_config.config.channel_mask;
   record.sample_count = model->active_config.config.record_count;
-  record.source = BOARD_A_DATA_SOURCE_TEST;
+  record.source = model->data_source;
   for (channel = 0U; channel < BOARD_A_MAX_CHANNELS; channel++) {
     record.values[channel] = model->snapshot.channel_values[channel];
     record.units[channel] = BOARD_A_UNIT_COUNT;
     record.qualities[channel] = model->snapshot.channel_quality[channel];
+  }
+  if (model->data_source == BOARD_A_DATA_SOURCE_REAL_DHT11) {
+    record.dht_valid_mask = model->snapshot.sensors.valid_mask;
+    record.dht_sample_id = model->snapshot.sensors.sample_id;
+    for (channel = 0U; channel < BOARD_A_SENSOR_COUNT; ++channel) {
+      record.dht_temperature_x10[channel] =
+          model->snapshot.sensors.sensors[channel].temperature_x10;
+      record.dht_humidity_x10[channel] =
+          model->snapshot.sensors.sensors[channel].humidity_x10;
+      record.dht_quality[channel] =
+          model->snapshot.sensors.sensors[channel].quality;
+      record.dht_error[channel] =
+          model->snapshot.sensors.sensors[channel].error;
+      record.dht_sample_time_ms[channel] =
+          model->snapshot.sensors.sensors[channel].sample_time_ms;
+    }
   }
 
   if (!board_a_persistence_queue_push(&model->persistence, &record)) {
@@ -404,6 +452,83 @@ static modbus_result_t read_holding_register(const board_a_model_t *model,
   }
 }
 
+static modbus_result_t read_dht11_register(const board_a_model_t *model,
+                                           uint16_t address,
+                                           uint16_t *value)
+{
+  const board_a_sensor_snapshot_t *snapshot =
+      &model->pending_sensor_snapshot;
+  uint16_t offset;
+  uint8_t sensor;
+
+  if ((address < BOARD_A_INPUT_DHT11_CONTRACT_REVISION) ||
+      (address > BOARD_A_INPUT_DHT11_SENSOR_TYPE)) {
+    return MODBUS_RESULT_ILLEGAL_ADDRESS;
+  }
+
+  switch (address) {
+    case BOARD_A_INPUT_DHT11_CONTRACT_REVISION:
+      *value = BOARD_A_DHT11_CONTRACT_REVISION;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DHT11_SOURCE_TYPE:
+      *value = ((model->data_source ==
+                 BOARD_A_DATA_SOURCE_REAL_DHT11) &&
+                (snapshot->sample_id != 0U)) ?
+          BOARD_A_DATA_SOURCE_REAL_DHT11 : 0U;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DHT11_VALID_MASK:
+      *value = snapshot->valid_mask;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DHT11_SAMPLE_ID_HI:
+      *value = word_high16(snapshot->sample_id);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DHT11_SAMPLE_ID_LO:
+      *value = word_low16(snapshot->sample_id);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_DHT11_SENSOR_TYPE:
+      *value = BOARD_A_SENSOR_TYPE_DHT11;
+      return MODBUS_RESULT_OK;
+    default:
+      break;
+  }
+
+  if ((address >= BOARD_A_INPUT_DHT11_TEMPERATURE_0) &&
+      (address <= BOARD_A_INPUT_DHT11_TEMPERATURE_2)) {
+    sensor = (uint8_t)(address - BOARD_A_INPUT_DHT11_TEMPERATURE_0);
+    *value = snapshot->sensors[sensor].temperature_x10;
+    return MODBUS_RESULT_OK;
+  }
+  if ((address >= BOARD_A_INPUT_DHT11_HUMIDITY_0) &&
+      (address <= BOARD_A_INPUT_DHT11_HUMIDITY_2)) {
+    sensor = (uint8_t)(address - BOARD_A_INPUT_DHT11_HUMIDITY_0);
+    *value = snapshot->sensors[sensor].humidity_x10;
+    return MODBUS_RESULT_OK;
+  }
+  if ((address >= BOARD_A_INPUT_DHT11_QUALITY_0) &&
+      (address <= BOARD_A_INPUT_DHT11_QUALITY_2)) {
+    sensor = (uint8_t)(address - BOARD_A_INPUT_DHT11_QUALITY_0);
+    *value = snapshot->sensors[sensor].quality;
+    return MODBUS_RESULT_OK;
+  }
+  if ((address >= BOARD_A_INPUT_DHT11_ERROR_0) &&
+      (address <= BOARD_A_INPUT_DHT11_ERROR_2)) {
+    sensor = (uint8_t)(address - BOARD_A_INPUT_DHT11_ERROR_0);
+    *value = snapshot->sensors[sensor].error;
+    return MODBUS_RESULT_OK;
+  }
+  if ((address >= BOARD_A_INPUT_DHT11_SAMPLE_TIME_0_HI) &&
+      (address <= BOARD_A_INPUT_DHT11_SAMPLE_TIME_2_LO)) {
+    offset = (uint16_t)(address - BOARD_A_INPUT_DHT11_SAMPLE_TIME_0_HI);
+    sensor = (uint8_t)(offset / 2U);
+    *value = ((offset % 2U) == 0U) ?
+        word_high16(snapshot->sensors[sensor].sample_time_ms) :
+        word_low16(snapshot->sensors[sensor].sample_time_ms);
+    return MODBUS_RESULT_OK;
+  }
+
+  return MODBUS_RESULT_ILLEGAL_ADDRESS;
+}
+
 static modbus_result_t read_input_register(const board_a_model_t *model,
                                            uint16_t address,
                                            uint16_t *value,
@@ -459,8 +584,11 @@ static modbus_result_t read_input_register(const board_a_model_t *model,
       *value = word_low16(model->last_command_id);
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_DATA_SOURCE_TYPE:
+      *value = model->data_source;
+      return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_SOURCE_TYPE:
-      *value = BOARD_A_DATA_SOURCE_TEST;
+      *value = model->snapshot.valid ?
+          model->snapshot.source : model->data_source;
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_SESSION_ID_HI:
       *value = word_high16(model->session_id);
@@ -537,7 +665,10 @@ static modbus_result_t read_input_register(const board_a_model_t *model,
       *value = model->snapshot.trigger;
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_UNIT_CODE:
-      *value = BOARD_A_UNIT_COUNT;
+      *value = (model->snapshot.valid &&
+                (model->snapshot.source ==
+                 BOARD_A_DATA_SOURCE_REAL_DHT11)) ?
+          BOARD_A_UNIT_NONE : BOARD_A_UNIT_COUNT;
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_RX_FRAMES_HI:
       *value = word_high16(model->stats.rx_frames);
@@ -780,13 +911,17 @@ static modbus_result_t read_input_register(const board_a_model_t *model,
       *value = 0U;
       return MODBUS_RESULT_OK;
     default:
-      return MODBUS_RESULT_ILLEGAL_ADDRESS;
+      return read_dht11_register(model, address, value);
   }
 }
 
 void board_a_model_init(board_a_model_t *model, uint32_t session_id)
 {
   uint8_t channel;
+
+  if (model == NULL) {
+    return;
+  }
 
   model->pending_config.period_sec = BOARD_A_DEFAULT_PERIOD_SEC;
   model->pending_config.channel_mask = BOARD_A_DEFAULT_CHANNEL_MASK;
@@ -797,12 +932,16 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->snapshot.valid = false;
   model->snapshot.sequence = 0U;
   model->snapshot.sample_time_us = 0U;
+  model->snapshot.source = BOARD_A_DATA_SOURCE_TEST;
   model->snapshot.channel_count = 1U;
   model->snapshot.trigger = BOARD_A_SAMPLE_TRIGGER_NONE;
   for (channel = 0U; channel < BOARD_A_MAX_CHANNELS; ++channel) {
     model->snapshot.channel_values[channel] = 0U;
     model->snapshot.channel_quality[channel] = BOARD_A_QUALITY_UNAVAILABLE;
   }
+  reset_sensor_snapshot(&model->snapshot.sensors);
+  reset_sensor_snapshot(&model->pending_sensor_snapshot);
+  model->data_source = BOARD_A_DATA_SOURCE_TEST;
   model->run_state = BOARD_A_RUN_STOPPED;
   model->session_id = session_id;
   model->command_register = BOARD_A_COMMAND_NONE;
@@ -840,6 +979,25 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->stats.persistence_errors = 0U;
   model->stats.device_faults = 0U;
   board_a_persistence_init(&model->persistence);
+}
+
+bool board_a_model_set_data_source(board_a_model_t *model, uint16_t source)
+{
+  if ((model == NULL) || !data_source_is_valid(source)) {
+    return false;
+  }
+  model->data_source = source;
+  return true;
+}
+
+void board_a_model_publish_sensor_snapshot(
+    board_a_model_t *model,
+    const board_a_sensor_snapshot_t *snapshot)
+{
+  if ((model == NULL) || (snapshot == NULL)) {
+    return;
+  }
+  model->pending_sensor_snapshot = *snapshot;
 }
 
 modbus_result_t board_a_model_read_registers(void *context,

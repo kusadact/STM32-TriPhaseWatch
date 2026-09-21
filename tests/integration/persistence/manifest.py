@@ -168,12 +168,13 @@ def validate_identity(value: Any) -> dict[str, Any]:
         raise ManifestError("identity.contract.protocol_version must be 3")
     if contract.get("contract_revision") != 1:
         raise ManifestError("identity.contract.contract_revision must be 1")
-    if contract.get("csv_schema") != 1:
-        raise ManifestError("identity.contract.csv_schema must be 1")
+    csv_schema = contract.get("csv_schema")
+    if csv_schema not in (1, 2):
+        raise ManifestError("identity.contract.csv_schema must be 1 or 2")
     identity["contract"] = {
         "protocol_version": 3,
         "contract_revision": 1,
-        "csv_schema": 1,
+        "csv_schema": csv_schema,
     }
     return identity
 

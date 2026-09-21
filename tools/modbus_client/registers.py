@@ -39,6 +39,31 @@ QUALITY_NAMES = {
     1: "TEST_VALID",
 }
 
+DATA_SOURCE_NAMES = {
+    0: "NONE",
+    1: "TEST",
+    2: "REAL_DHT11",
+}
+
+DHT11_QUALITY_NAMES = {
+    1: "OK",
+    2: "TIMEOUT",
+    3: "CHECKSUM_ERROR",
+    4: "RANGE_ERROR",
+    5: "STALE",
+    6: "NOT_PRESENT",
+}
+
+DHT11_ERROR_NAMES = {
+    0: "NONE",
+    1: "TIMEOUT_RESPONSE",
+    2: "TIMEOUT_BIT",
+    3: "CHECKSUM",
+    4: "RANGE",
+    5: "TOO_SOON",
+    255: "DRIVER",
+}
+
 SAVE_STATE_NAMES = {
     0: "IDLE",
     1: "PENDING",
@@ -189,13 +214,63 @@ def decode_snapshot(values: Sequence[int]) -> dict[str, Any]:
         "valid": bool(values[0]),
         "sequence": _word32(values[1], values[2]),
         "source_type": values[3],
-        "source": "TEST" if values[3] == 1 else f"UNKNOWN({values[3]})",
+        "source": DATA_SOURCE_NAMES.get(
+            values[3],
+            f"UNKNOWN({values[3]})",
+        ),
         "channel_count": values[4],
         "channels": channels,
         "trigger_code": trigger,
         "trigger": TRIGGER_NAMES.get(trigger, f"UNKNOWN({trigger})"),
         "unit_code": values[14],
         "unit": "count" if values[14] == 1 else f"UNKNOWN({values[14]})",
+    }
+
+
+def decode_dht11_snapshot(values: Sequence[int]) -> dict[str, Any]:
+    """Decode the 24-register DHT11 extension block at input 0x00B0."""
+
+    _require_length(values, 24, "DHT11 snapshot")
+    source = values[1]
+    valid_mask = values[2]
+    sensors = []
+    for index in range(3):
+        quality = values[11 + index]
+        error = values[14 + index]
+        sample_time_offset = 17 + (index * 2)
+        sensors.append(
+            {
+                "sensor_id": index,
+                "sensor_type": "DHT11",
+                "valid": bool(valid_mask & (1 << index)),
+                "temperature_x10": values[5 + index],
+                "temperature_unit": "0.1degC",
+                "humidity_x10": values[8 + index],
+                "humidity_unit": "0.1%RH",
+                "quality_code": quality,
+                "quality": DHT11_QUALITY_NAMES.get(
+                    quality,
+                    f"UNKNOWN({quality})",
+                ),
+                "error_code": error,
+                "error": DHT11_ERROR_NAMES.get(
+                    error,
+                    f"UNKNOWN({error})",
+                ),
+                "sample_time_ms": _word32(
+                    values[sample_time_offset],
+                    values[sample_time_offset + 1],
+                ),
+            }
+        )
+    return {
+        "contract_revision": values[0],
+        "source_type": source,
+        "source": DATA_SOURCE_NAMES.get(source, f"UNKNOWN({source})"),
+        "valid_mask": valid_mask,
+        "sample_id": _word32(values[3], values[4]),
+        "sensors": sensors,
+        "sensor_type_code": values[23],
     }
 
 

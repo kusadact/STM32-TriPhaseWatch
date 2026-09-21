@@ -6,9 +6,10 @@
 
 #define BOARD_A_CONFIG_PAYLOAD_SCHEMA 1U
 #define BOARD_A_CONFIG_PAYLOAD_SIZE 12U
-#define BOARD_A_RECORD_SCHEMA 1U
+#define BOARD_A_RECORD_SCHEMA 2U
 #define BOARD_A_RECORD_CHANNEL_COUNT 4U
-#define BOARD_A_RECORD_CSV_MAX_BYTES 384U
+#define BOARD_A_RECORD_DHT11_COUNT 3U
+#define BOARD_A_RECORD_CSV_MAX_BYTES 512U
 #define BOARD_A_RECORD_PATH_MAX_BYTES 32U
 
 typedef struct {
@@ -33,6 +34,13 @@ typedef struct {
   uint16_t values[BOARD_A_RECORD_CHANNEL_COUNT];
   uint16_t units[BOARD_A_RECORD_CHANNEL_COUNT];
   uint16_t qualities[BOARD_A_RECORD_CHANNEL_COUNT];
+  uint16_t dht_valid_mask;
+  uint32_t dht_sample_id;
+  uint16_t dht_temperature_x10[BOARD_A_RECORD_DHT11_COUNT];
+  uint16_t dht_humidity_x10[BOARD_A_RECORD_DHT11_COUNT];
+  uint16_t dht_quality[BOARD_A_RECORD_DHT11_COUNT];
+  uint16_t dht_error[BOARD_A_RECORD_DHT11_COUNT];
+  uint32_t dht_sample_time_ms[BOARD_A_RECORD_DHT11_COUNT];
   uint32_t file_id;
   uint32_t file_date;
 } board_a_record_format_record_t;

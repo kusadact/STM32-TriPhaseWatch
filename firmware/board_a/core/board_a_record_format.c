@@ -7,7 +7,12 @@
 static const char BOARD_A_RECORD_CSV_HEADER[] =
     "schema,session,seq,trigger,planned_ms,actual_ms,utc_valid,utc_s,"
     "config_version,period_s,mask,sample_count,source,v0,v1,v2,v3,u0,u1,u2,"
-    "u3,q0,q1,q2,q3,file_id,file_date,reserved\n";
+    "u3,q0,q1,q2,q3,file_id,file_date,reserved,dht_valid_mask,dht_sample_id,"
+    "dht0_temp_x10,dht1_temp_x10,dht2_temp_x10,"
+    "dht0_humidity_x10,dht1_humidity_x10,dht2_humidity_x10,"
+    "dht0_quality,dht1_quality,dht2_quality,"
+    "dht0_error,dht1_error,dht2_error,"
+    "dht0_sample_ms,dht1_sample_ms,dht2_sample_ms\n";
 
 const char *board_a_record_format_csv_header(void)
 {
@@ -78,6 +83,39 @@ static void write_le16(uint8_t *data, uint16_t value)
   data[1] = (uint8_t)(value >> 8U);
 }
 
+static int dht_error_matches_quality(uint16_t quality, uint16_t error)
+{
+  if (quality == BOARD_A_QUALITY_OK) {
+    return error == BOARD_A_SENSOR_ERROR_NONE;
+  }
+  if (quality == BOARD_A_QUALITY_TIMEOUT) {
+    return (error == BOARD_A_SENSOR_ERROR_TIMEOUT_RESPONSE) ||
+        (error == BOARD_A_SENSOR_ERROR_TIMEOUT_BIT);
+  }
+  if (quality == BOARD_A_QUALITY_CHECKSUM_ERROR) {
+    return error == BOARD_A_SENSOR_ERROR_CHECKSUM;
+  }
+  if (quality == BOARD_A_QUALITY_RANGE_ERROR) {
+    return error == BOARD_A_SENSOR_ERROR_RANGE;
+  }
+  if (quality == BOARD_A_QUALITY_STALE) {
+    return (error == BOARD_A_SENSOR_ERROR_TIMEOUT_RESPONSE) ||
+        (error == BOARD_A_SENSOR_ERROR_TIMEOUT_BIT) ||
+        (error == BOARD_A_SENSOR_ERROR_CHECKSUM) ||
+        (error == BOARD_A_SENSOR_ERROR_RANGE) ||
+        (error == BOARD_A_SENSOR_ERROR_TOO_SOON);
+  }
+  if (quality == BOARD_A_QUALITY_NOT_PRESENT) {
+    return (error == BOARD_A_SENSOR_ERROR_NONE) ||
+        (error == BOARD_A_SENSOR_ERROR_TIMEOUT_RESPONSE) ||
+        (error == BOARD_A_SENSOR_ERROR_TIMEOUT_BIT) ||
+        (error == BOARD_A_SENSOR_ERROR_CHECKSUM) ||
+        (error == BOARD_A_SENSOR_ERROR_RANGE) ||
+        (error == BOARD_A_SENSOR_ERROR_DRIVER);
+  }
+  return 0;
+}
+
 int board_a_config_payload_validate(const uint8_t *payload, size_t length)
 {
   board_a_persisted_config_t config;
@@ -135,6 +173,7 @@ int board_a_record_format_is_valid(
     const board_a_record_format_record_t *record)
 {
   uint8_t channel;
+  uint8_t sensor;
 
   if ((record == NULL) ||
       ((record->trigger != BOARD_A_SAMPLE_TRIGGER_PERIODIC) &&
@@ -145,18 +184,80 @@ int board_a_record_format_is_valid(
       (record->period_sec > BOARD_A_PERIOD_MAX_SEC) ||
       (record->channel_mask < BOARD_A_CHANNEL_MASK_MIN) ||
       (record->channel_mask > BOARD_A_CHANNEL_MASK_MAX) ||
-      (record->source != BOARD_A_DATA_SOURCE_TEST)) {
+      ((record->source != BOARD_A_DATA_SOURCE_TEST) &&
+       (record->source != BOARD_A_DATA_SOURCE_REAL_DHT11)) ||
+      ((record->dht_valid_mask & (uint16_t)~0x0007U) != 0U)) {
     return 0;
   }
 
   for (channel = 0U; channel < BOARD_A_RECORD_CHANNEL_COUNT; channel++) {
-    if ((record->units[channel] != BOARD_A_UNIT_COUNT) ||
-        (record->qualities[channel] >
-         BOARD_A_QUALITY_TEST_VALID) ||
-        (((record->channel_mask & (uint16_t)(1U << channel)) == 0U) &&
-         ((record->values[channel] != 0U) ||
-          (record->qualities[channel] !=
-           BOARD_A_QUALITY_UNAVAILABLE)))) {
+    if (record->units[channel] != BOARD_A_UNIT_COUNT) {
+      return 0;
+    }
+    if (record->source == BOARD_A_DATA_SOURCE_TEST) {
+      if ((record->qualities[channel] >
+           BOARD_A_QUALITY_TEST_VALID) ||
+          (((record->channel_mask & (uint16_t)(1U << channel)) == 0U) &&
+           ((record->values[channel] != 0U) ||
+            (record->qualities[channel] !=
+             BOARD_A_QUALITY_UNAVAILABLE)))) {
+        return 0;
+      }
+    } else if ((record->values[channel] != 0U) ||
+               (record->qualities[channel] !=
+                BOARD_A_QUALITY_UNAVAILABLE)) {
+      return 0;
+    }
+  }
+
+  for (sensor = 0U; sensor < BOARD_A_RECORD_DHT11_COUNT; ++sensor) {
+    bool has_value;
+    uint16_t quality = record->dht_quality[sensor];
+
+    if (record->source == BOARD_A_DATA_SOURCE_TEST) {
+      if ((record->dht_valid_mask != 0U) ||
+          (record->dht_sample_id != 0U) ||
+          (record->dht_temperature_x10[sensor] != 0U) ||
+          (record->dht_humidity_x10[sensor] != 0U) ||
+          (record->dht_quality[sensor] != 0U) ||
+          (record->dht_error[sensor] != 0U) ||
+          (record->dht_sample_time_ms[sensor] != 0U)) {
+        return 0;
+      }
+      continue;
+    }
+    if (record->dht_sample_id == 0U) {
+      return 0;
+    }
+
+    if ((quality != BOARD_A_QUALITY_OK) &&
+        (quality != BOARD_A_QUALITY_TIMEOUT) &&
+        (quality != BOARD_A_QUALITY_CHECKSUM_ERROR) &&
+        (quality != BOARD_A_QUALITY_RANGE_ERROR) &&
+        (quality != BOARD_A_QUALITY_STALE) &&
+        (quality != BOARD_A_QUALITY_NOT_PRESENT)) {
+      return 0;
+    }
+    has_value = (quality == BOARD_A_QUALITY_OK) ||
+        (quality == BOARD_A_QUALITY_STALE);
+    if (((record->dht_valid_mask & (uint16_t)(1U << sensor)) != 0U) !=
+        has_value) {
+      return 0;
+    }
+    if (!has_value &&
+        ((record->dht_temperature_x10[sensor] != 0U) ||
+         (record->dht_humidity_x10[sensor] != 0U))) {
+      return 0;
+    }
+    if ((quality == BOARD_A_QUALITY_OK) &&
+        (record->dht_error[sensor] != BOARD_A_SENSOR_ERROR_NONE)) {
+      return 0;
+    }
+    if ((quality == BOARD_A_QUALITY_STALE) &&
+        (record->dht_error[sensor] == BOARD_A_SENSOR_ERROR_NONE)) {
+      return 0;
+    }
+    if (!dht_error_matches_quality(quality, record->dht_error[sensor])) {
       return 0;
     }
   }
@@ -227,6 +328,30 @@ int board_a_record_format_encode_csv(
   csv_put_u32(&writer, record->file_date);
   csv_put_comma(&writer);
   csv_put_u16(&writer, 0U);
+  csv_put_comma(&writer);
+  csv_put_u16(&writer, record->dht_valid_mask);
+  csv_put_comma(&writer);
+  csv_put_u32(&writer, record->dht_sample_id);
+  for (channel = 0U; channel < BOARD_A_RECORD_DHT11_COUNT; ++channel) {
+    csv_put_comma(&writer);
+    csv_put_u16(&writer, record->dht_temperature_x10[channel]);
+  }
+  for (channel = 0U; channel < BOARD_A_RECORD_DHT11_COUNT; ++channel) {
+    csv_put_comma(&writer);
+    csv_put_u16(&writer, record->dht_humidity_x10[channel]);
+  }
+  for (channel = 0U; channel < BOARD_A_RECORD_DHT11_COUNT; ++channel) {
+    csv_put_comma(&writer);
+    csv_put_u16(&writer, record->dht_quality[channel]);
+  }
+  for (channel = 0U; channel < BOARD_A_RECORD_DHT11_COUNT; ++channel) {
+    csv_put_comma(&writer);
+    csv_put_u16(&writer, record->dht_error[channel]);
+  }
+  for (channel = 0U; channel < BOARD_A_RECORD_DHT11_COUNT; ++channel) {
+    csv_put_comma(&writer);
+    csv_put_u32(&writer, record->dht_sample_time_ms[channel]);
+  }
   csv_put_byte(&writer, (uint8_t)'\n');
 
   if (writer.overflow != 0) {
