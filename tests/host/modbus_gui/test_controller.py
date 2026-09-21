@@ -1,0 +1,372 @@
+from __future__ import annotations
+
+import threading
+import time
+import unittest
+
+from tools.modbus_client.errors import (
+    StateError,
+    TransactionTimeout,
+    TransportError,
+)
+from tools.modbus_gui.controller import GuiController
+from tools.modbus_gui.model import AcquisitionPhase, ConnectionState
+from fake_backend import FakeBackend
+
+
+def sensor(
+    sensor_id: int,
+    temperature_x10: int | None,
+    humidity_x10: int | None,
+    quality: str,
+    sample_time: int | None = None,
+) -> dict[str, object]:
+    return {
+        "sensor_id": sensor_id,
+        "temperature_x10": temperature_x10,
+        "humidity_x10": humidity_x10,
+        "quality": quality,
+        "sample_time": sample_time,
+        "source": "DHT11",
+    }
+
+
+class ControllerTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.backend = FakeBackend()
+        self.controller = GuiController(
+            self.backend,
+            poll_interval=2.0,
+            storage_interval=30.0,
+            close_timeout=0.5,
+        )
+
+    def tearDown(self) -> None:
+        self.controller.shutdown(timeout=0.5)
+
+    def wait_until(self, predicate, timeout: float = 1.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.controller.poll()
+            if predicate():
+                return
+            time.sleep(0.001)
+        self.fail("condition was not reached before timeout")
+
+    def wait_idle(self, timeout: float = 1.0) -> None:
+        self.wait_until(lambda: not self.controller.state.is_busy, timeout)
+
+    def connect(self) -> None:
+        self.assertTrue(self.controller.connect("/dev/fake", 1))
+        self.assertEqual(
+            self.controller.state.connection,
+            ConnectionState.CONNECTING,
+        )
+        self.assertFalse(self.controller.state.session_open)
+        self.wait_idle()
+        self.assertEqual(
+            self.controller.state.connection,
+            ConnectionState.CONNECTED,
+        )
+
+    def set_three_valid_sensors(self) -> None:
+        self.backend.temperature_payload = {
+            "sample_id": 101,
+            "source": "DHT11",
+            "sensors": [
+                sensor(0, 200, 600, "OK", 1000),
+                sensor(1, 250, 550, "OK", 1001),
+                sensor(2, 300, 500, "OK", 1002),
+            ],
+        }
+
+
+class ControllerTests(ControllerTestCase):
+    def test_all_ok_cards_and_statistics(self) -> None:
+        self.connect()
+        self.set_three_valid_sensors()
+
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        cards = self.controller.state.sensor_cards()
+        self.assertEqual(cards[0].temperature_text, "20.0 °C")
+        self.assertEqual(cards[1].humidity_text, "55.0 %RH")
+        self.assertEqual(cards[2].quality_text, "OK")
+        self.assertEqual(self.controller.state.last_sample_id, 101)
+        self.assertEqual(
+            self.controller.state.statistics.median_temperature_text,
+            "25.0 °C",
+        )
+        self.assertEqual(
+            self.controller.state.statistics.valid_count_text,
+            "3 / 3",
+        )
+        self.assertEqual(
+            [event[0] for event in self.backend.events],
+            ["connect", "poll"],
+        )
+
+    def test_checksum_error_only_excludes_that_card(self) -> None:
+        self.connect()
+        self.backend.temperature_payload = {
+            "sample_id": 102,
+            "sensors": [
+                sensor(0, 200, 600, "OK"),
+                sensor(1, 0, 0, "CHECKSUM_ERROR"),
+                sensor(2, 300, 500, "OK"),
+            ],
+        }
+
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        cards = self.controller.state.sensor_cards()
+        self.assertEqual(cards[1].temperature_text, "--")
+        self.assertEqual(cards[1].quality_text, "校验失败")
+        self.assertEqual(
+            self.controller.state.statistics.valid_sensor_ids,
+            (0, 2),
+        )
+
+    def test_not_present_card_does_not_show_zero(self) -> None:
+        self.connect()
+        self.backend.temperature_payload = {
+            "sample_id": 103,
+            "sensors": [
+                sensor(0, 200, 600, "OK"),
+                sensor(1, 210, 610, "OK"),
+                sensor(2, 0, 0, "NOT_PRESENT"),
+            ],
+        }
+
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        card = self.controller.state.sensor_cards()[2]
+        self.assertEqual(card.temperature_text, "--")
+        self.assertEqual(card.humidity_text, "--")
+        self.assertEqual(card.quality_text, "未接入")
+
+    def test_all_invalid_sensors_report_no_valid_samples(self) -> None:
+        self.connect()
+        self.backend.temperature_payload = {
+            "sample_id": 104,
+            "sensors": [
+                sensor(0, 0, 0, "TIMEOUT"),
+                sensor(1, 0, 0, "CHECKSUM_ERROR"),
+                sensor(2, 0, 0, "RANGE_ERROR"),
+            ],
+        }
+
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        statistics = self.controller.state.statistics
+        self.assertFalse(statistics.has_valid_samples)
+        self.assertEqual(statistics.minimum_temperature_text, "--")
+        self.assertEqual(statistics.participating_sensor_text, "无有效样本")
+
+    def test_missing_dht_interface_is_honest_and_does_not_show_test_count(self) -> None:
+        self.backend.temperature_payload = None
+        self.backend.sensor_error = {
+            "kind": "unsupported_protocol",
+            "message": "DHT11 interface is not frozen",
+            "interface_unavailable": True,
+        }
+        self.connect()
+
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        state = self.controller.state
+        self.assertEqual(state.connection, ConnectionState.CONNECTED)
+        self.assertEqual(state.sensor_cards()[0].temperature_text, "--")
+        self.assertEqual(state.sensor_cards()[0].quality_text, "接口未冻结")
+        self.assertFalse(state.statistics.has_valid_samples)
+
+    def test_timeout_keeps_old_values_stale_and_recovers(self) -> None:
+        self.connect()
+        self.set_three_valid_sensors()
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        self.backend.poll_results.append(
+            TransactionTimeout("simulated transaction timeout")
+        )
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        state = self.controller.state
+        self.assertEqual(state.connection, ConnectionState.DEVICE_UNRESPONSIVE)
+        self.assertEqual(state.sensor_cards()[0].temperature_text, "20.0 °C")
+        self.assertEqual(state.sensor_cards()[0].quality_text, "旧值")
+        self.assertFalse(state.statistics.has_valid_samples)
+        self.assertTrue(state.availability().disconnect)
+        self.assertEqual(state.failed_count, 1)
+
+        self.controller.tick(now=time.monotonic() + 60.0)
+        self.wait_idle()
+        self.assertEqual(self.controller.state.connection, ConnectionState.CONNECTED)
+        self.assertEqual(self.controller.state.sensor_cards()[0].quality_text, "OK")
+
+    def test_connect_failure_can_retry_successfully(self) -> None:
+        self.backend.connect_results.append(TransportError("port unavailable"))
+
+        self.assertTrue(self.controller.connect("/dev/fake", 1))
+        self.wait_idle()
+        self.assertEqual(
+            self.controller.state.connection,
+            ConnectionState.DEVICE_UNRESPONSIVE,
+        )
+        self.assertFalse(self.controller.state.session_open)
+        self.assertTrue(self.controller.state.availability().connect)
+
+        self.assertTrue(self.controller.connect("/dev/fake", 1))
+        self.wait_idle()
+        self.assertEqual(
+            self.controller.state.connection,
+            ConnectionState.CONNECTED,
+        )
+        self.assertEqual(
+            [event[0] for event in self.backend.events],
+            ["connect", "connect"],
+        )
+
+    def test_start_success_pending_and_failure_button_states(self) -> None:
+        cases = (
+            (
+                "success",
+                None,
+                AcquisitionPhase.RUNNING,
+                False,
+                True,
+            ),
+            (
+                "pending",
+                {"pending": True},
+                AcquisitionPhase.STARTING,
+                False,
+                True,
+            ),
+            (
+                "failure",
+                StateError("start rejected"),
+                AcquisitionPhase.STOPPED,
+                True,
+                False,
+            ),
+        )
+        for name, outcome, phase, can_start, can_stop in cases:
+            with self.subTest(name=name):
+                self.tearDown()
+                self.setUp()
+                self.connect()
+                if outcome is not None:
+                    self.backend.start_results.append(outcome)
+
+                self.assertTrue(self.controller.start_periodic(30))
+                self.wait_idle()
+
+                state = self.controller.state
+                self.assertEqual(state.acquisition, phase)
+                self.assertEqual(state.period_sec, 30)
+                self.assertEqual(
+                    state.availability().start_periodic,
+                    can_start,
+                )
+                self.assertEqual(
+                    state.availability().stop_periodic,
+                    can_stop,
+                )
+
+    def test_stop_timeout_does_not_pretend_stopped(self) -> None:
+        self.connect()
+        self.assertTrue(self.controller.start_periodic(10))
+        self.wait_idle()
+        self.assertEqual(
+            self.controller.state.acquisition,
+            AcquisitionPhase.RUNNING,
+        )
+        self.backend.stop_results.append(
+            TransactionTimeout("stop acknowledgement timeout")
+        )
+
+        self.assertTrue(self.controller.stop_periodic())
+        self.wait_idle()
+
+        state = self.controller.state
+        self.assertEqual(state.acquisition, AcquisitionPhase.STOP_UNCONFIRMED)
+        self.assertNotEqual(state.acquisition, AcquisitionPhase.STOPPED)
+        self.assertFalse(state.availability().start_periodic)
+        self.assertTrue(state.availability().stop_periodic)
+
+    def test_storage_counts_are_displayed_verbatim(self) -> None:
+        self.connect()
+        self.backend.storage_payload = {
+            "storage_state_name": "READY",
+            "storage_error_name": "NONE",
+            "generated": 40,
+            "synced": 31,
+            "dropped": 2,
+            "uncertain": 1,
+            "queued": 8,
+            "in_flight": 1,
+            "last_synced_file": 12,
+            "last_synced_date": 20260922,
+            "last_synced_seq": 1234,
+        }
+
+        self.assertTrue(self.controller.refresh_storage())
+        self.wait_idle()
+
+        storage = self.controller.state.storage
+        self.assertIsNotNone(storage)
+        self.assertEqual(storage.text("generated"), "40")
+        self.assertEqual(storage.text("synced"), "31")
+        self.assertEqual(storage.text("dropped"), "2")
+        self.assertEqual(storage.text("uncertain"), "1")
+        self.assertEqual(storage.text("queued"), "8")
+        self.assertEqual(storage.text("in_flight"), "1")
+        self.assertEqual(storage.text("last_synced_seq"), "1234")
+
+    def test_shutdown_stops_worker_and_closes_backend(self) -> None:
+        started = time.monotonic()
+        exited = self.controller.shutdown(timeout=0.5)
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(exited)
+        self.assertLess(elapsed, 0.5)
+        self.assertIn("close", [event[0] for event in self.backend.events])
+
+    def test_shutdown_is_bounded_when_backend_call_blocks(self) -> None:
+        started = threading.Event()
+
+        class BlockingBackend(FakeBackend):
+            def refresh_storage(self):
+                started.set()
+                time.sleep(0.20)
+                return super().refresh_storage()
+
+        backend = BlockingBackend()
+        controller = GuiController(backend, close_timeout=1.0)
+        self.assertTrue(controller.connect("/dev/fake", 1))
+        deadline = time.monotonic() + 1.0
+        while controller.state.is_busy and time.monotonic() < deadline:
+            controller.poll()
+            time.sleep(0.001)
+        self.assertTrue(controller.refresh_storage())
+        self.assertTrue(started.wait(0.5))
+
+        shutdown_started = time.monotonic()
+        exited = controller.shutdown(timeout=0.02)
+        elapsed = time.monotonic() - shutdown_started
+
+        self.assertFalse(exited)
+        self.assertLess(elapsed, 0.10)
+        time.sleep(0.25)
+        self.assertIn("close", [event[0] for event in backend.events])
+
+
+if __name__ == "__main__":
+    unittest.main()
