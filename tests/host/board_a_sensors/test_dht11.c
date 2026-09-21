@@ -423,6 +423,33 @@ static void test_manager_stale_then_not_present(void)
   CHECK(snapshot.sensors[2].quality == BOARD_A_QUALITY_OK);
 }
 
+static void test_manager_missing_stays_not_present_across_counter_boundary(void)
+{
+  fake_bus_t bus;
+  dht11_port_t port;
+  board_a_sensor_manager_t manager;
+  board_a_sensor_snapshot_t snapshot;
+  uint16_t scan;
+
+  memset(&bus, 0, sizeof(bus));
+  port = make_fake_port(&bus);
+  set_frame(&bus, 0U, 40U, 20U);
+  bus.sensors[1].mode = FAKE_RESPONSE_TIMEOUT;
+  set_frame(&bus, 2U, 60U, 30U);
+  board_a_sensor_manager_init(&manager, &port);
+
+  for (scan = 0U; scan < 300U; ++scan) {
+    CHECK(board_a_sensor_manager_scan(&manager, bus.now_us, &snapshot));
+    if (scan >= 2U) {
+      CHECK(snapshot.sensors[1].quality ==
+            BOARD_A_QUALITY_NOT_PRESENT);
+      CHECK(!snapshot.sensors[1].has_value);
+      CHECK((snapshot.valid_mask & 0x0002U) == 0U);
+    }
+    bus.now_us += BOARD_A_SENSOR_SCAN_PERIOD_US;
+  }
+}
+
 int main(void)
 {
   test_driver_valid_and_interval();
@@ -430,6 +457,7 @@ int main(void)
   test_manager_serial_scan_and_isolated_failure();
   test_manager_checksum_and_missing_do_not_stop_others();
   test_manager_stale_then_not_present();
+  test_manager_missing_stays_not_present_across_counter_boundary();
 
   printf("DHT11 sensor host tests: %u checks, %u failures\n",
          g_checks, g_failures);

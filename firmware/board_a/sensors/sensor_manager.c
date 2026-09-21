@@ -112,7 +112,10 @@ bool board_a_sensor_manager_scan(
       state->sample_time_ms = result.sample_time_ms;
       manager->consecutive_failures[index] = 0U;
     } else if (status != DHT11_STATUS_TOO_SOON) {
-      manager->consecutive_failures[index]++;
+      if (manager->consecutive_failures[index] <
+          BOARD_A_SENSOR_NOT_PRESENT_FAILURES) {
+        manager->consecutive_failures[index]++;
+      }
       state->error = error_for_status(status);
       if (manager->consecutive_failures[index] >=
           BOARD_A_SENSOR_NOT_PRESENT_FAILURES) {
