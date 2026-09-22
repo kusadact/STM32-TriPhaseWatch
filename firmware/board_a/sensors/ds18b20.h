@@ -47,6 +47,7 @@ typedef struct {
 typedef struct {
   const ds18b20_port_t *port;
   uint8_t last_discrepancy;
+  ds18b20_rom_t search_rom;
   bool last_device;
 } ds18b20_t;
 

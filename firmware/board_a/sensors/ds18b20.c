@@ -221,6 +221,7 @@ void ds18b20_search_start(ds18b20_t *device)
     return;
   }
   device->last_discrepancy = 0U;
+  memset(&device->search_rom, 0, sizeof(device->search_rom));
   device->last_device = false;
 }
 
@@ -230,6 +231,7 @@ ds18b20_status_t ds18b20_search_next(
   uint8_t last_zero = 0U;
   uint8_t bit_number;
   ds18b20_status_t status;
+  ds18b20_rom_t *search_rom;
 
   if ((device == NULL) || (rom == NULL) ||
       !ds18b20_port_is_valid(device->port)) {
@@ -244,7 +246,15 @@ ds18b20_status_t ds18b20_search_next(
     return status;
   }
   ds18b20_write_byte(device, DS18B20_CMD_SEARCH_ROM);
-  memset(rom, 0, sizeof(*rom));
+
+  /*
+   * The discrepancy branch below copies the path taken in the previous pass,
+   * so the working ROM must survive between calls. It lives in the device
+   * state instead of the caller's buffer and is copied out once the pass is
+   * complete. Clearing it every pass made the search revisit the same two
+   * ROMs forever for some device sets.
+   */
+  search_rom = &device->search_rom;
 
   for (bit_number = 1U; bit_number <= 64U; ++bit_number) {
     uint8_t index = (uint8_t)(bit_number - 1U);
@@ -259,7 +269,7 @@ ds18b20_status_t ds18b20_search_next(
       direction = id_bit;
     } else {
       if (bit_number < device->last_discrepancy) {
-        direction = ds18b20_rom_bit(rom, index) != 0U;
+        direction = ds18b20_rom_bit(search_rom, index) != 0U;
       } else if (bit_number == device->last_discrepancy) {
         direction = true;
       } else {
@@ -269,10 +279,11 @@ ds18b20_status_t ds18b20_search_next(
         last_zero = bit_number;
       }
     }
-    ds18b20_rom_set_bit(rom, index, direction);
+    ds18b20_rom_set_bit(search_rom, index, direction);
     (void)ds18b20_write_bit(device, direction);
   }
 
+  *rom = *search_rom;
   if (last_zero == 0U) {
     device->last_device = true;
   } else {

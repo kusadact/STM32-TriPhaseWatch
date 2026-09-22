@@ -30,6 +30,11 @@ static bool binding_matches_device(
   return memcmp(binding->rom, device->rom, DS18B20_ROM_SIZE) == 0;
 }
 
+static uint16_t expected_rom_short(const uint8_t rom[DS18B20_ROM_SIZE])
+{
+  return (uint16_t)(((uint16_t)rom[2] << 8U) | (uint16_t)rom[1]);
+}
+
 static int device_index_for_binding(
     const fake_bus_t *bus, const board_a_sensor_binding_t *binding)
 {
@@ -188,7 +193,7 @@ static void test_partial_map_fills_free_slots_without_renumbering(void)
   map.valid_mask = 0x01U;
   map.bindings[0].bound = true;
   memcpy(map.bindings[0].rom, bus.devices[0].rom, DS18B20_ROM_SIZE);
-  map.bindings[0].rom_short = 0x1234U;
+  map.bindings[0].rom_short = 0x1234U; /* wrong on purpose: set_map derives it */
   memcpy(saved_rom, bus.devices[0].rom, DS18B20_ROM_SIZE);
 
   board_a_sensor_manager_init(&manager, &port);
@@ -200,7 +205,7 @@ static void test_partial_map_fills_free_slots_without_renumbering(void)
   CHECK(manager.map_dirty);
   CHECK(memcmp(manager.map.bindings[0].rom, saved_rom,
                DS18B20_ROM_SIZE) == 0);
-  CHECK(manager.map.bindings[0].rom_short == 0x1234U);
+  CHECK(manager.map.bindings[0].rom_short == expected_rom_short(saved_rom));
   CHECK(device_index_for_binding(&bus, &manager.map.bindings[1]) >= 0);
   CHECK(device_index_for_binding(&bus, &manager.map.bindings[2]) >= 0);
   CHECK(device_index_for_binding(&bus, &manager.map.bindings[1]) !=
@@ -333,6 +338,52 @@ static void test_slow_bus_is_bounded_by_time_budget(void)
   CHECK(manager.next_discovery_us > bus.now_us);
 }
 
+static void test_discovery_handles_history_rom_bits(void)
+{
+  fake_bus_t bus = make_bus(3U);
+  ds18b20_port_t port = make_port(&bus);
+  board_a_sensor_manager_t manager;
+  board_a_sensor_snapshot_t snapshot;
+
+  /* Same ROM set that made the un-fixed search alternate between two ROMs. */
+  make_rom(&bus.devices[0], 1U);
+  make_rom(&bus.devices[1], 2U);
+  make_rom(&bus.devices[2], 4U);
+
+  board_a_sensor_manager_init(&manager, &port);
+  CHECK(!discover(&manager, &bus));
+  CHECK(manager.map.valid_mask == 0x07U);
+  CHECK(read_after_conversion(&manager, &bus, &snapshot));
+  CHECK(snapshot.valid_mask == 0x0007U);
+  CHECK(snapshot.sensors[0].quality == BOARD_A_QUALITY_OK);
+  CHECK(snapshot.sensors[1].quality == BOARD_A_QUALITY_OK);
+  CHECK(snapshot.sensors[2].quality == BOARD_A_QUALITY_OK);
+}
+
+static void test_set_map_normalises_derived_fields(void)
+{
+  fake_bus_t bus = make_bus(3U);
+  ds18b20_port_t port = make_port(&bus);
+  board_a_sensor_manager_t manager;
+  board_a_sensor_map_t map;
+
+  memset(&map, 0, sizeof(map));
+  map.valid_mask = 0x05U; /* slots 0 and 2 bound */
+  map.bindings[0].bound = false; /* deliberately inconsistent with the mask */
+  memcpy(map.bindings[0].rom, bus.devices[0].rom, DS18B20_ROM_SIZE);
+  map.bindings[2].bound = true;
+  memcpy(map.bindings[2].rom, bus.devices[2].rom, DS18B20_ROM_SIZE);
+
+  board_a_sensor_manager_init(&manager, &port);
+  CHECK(board_a_sensor_manager_set_map(&manager, &map));
+  CHECK(manager.map.bindings[0].bound);
+  CHECK(!manager.map.bindings[1].bound);
+  CHECK(manager.map.bindings[2].bound);
+  CHECK(manager.map.bindings[0].rom_short != 0U);
+  CHECK(manager.map.bindings[1].rom_short == 0U);
+  CHECK(manager.map.bindings[2].rom_short != 0U);
+}
+
 int main(void)
 {
   test_auto_discovery_and_three_temperatures();
@@ -343,6 +394,8 @@ int main(void)
   test_missing_bound_rom_is_not_replaced();
   test_scan_stops_once_all_slots_are_bound();
   test_slow_bus_is_bounded_by_time_budget();
+  test_discovery_handles_history_rom_bits();
+  test_set_map_normalises_derived_fields();
   printf("DS18B20 manager host tests: %u checks, %u failures\n",
          g_checks, g_failures);
   return g_failures == 0U ? 0 : 1;

@@ -449,6 +449,54 @@ static void test_search_three_devices(void)
   }
 }
 
+/*
+ * Serials 1,2,4 drive the discrepancy walk into a state where a later pass has
+ * to copy a "1" bit from the previous pass while still below the last branch
+ * point. With the working ROM cleared on every pass the search alternated
+ * between the same two ROMs forever (the bench hang); the serials used by the
+ * other search test (1,2,3) never reach that state.
+ */
+static void test_search_keeps_previous_rom_bits(void)
+{
+  fake_bus_t bus = make_bus(3U);
+  ds18b20_port_t port = make_port(&bus);
+  ds18b20_t device;
+  ds18b20_rom_t found[4];
+  ds18b20_status_t status = DS18B20_STATUS_OK;
+  uint8_t count = 0U;
+  uint8_t index;
+
+  make_rom(&bus.devices[0], 1U);
+  make_rom(&bus.devices[1], 2U);
+  make_rom(&bus.devices[2], 4U);
+
+  ds18b20_init(&device, &port);
+  ds18b20_search_start(&device);
+  for (index = 0U; index < 4U; ++index) {
+    status = ds18b20_search_next(&device, &found[count]);
+    if (status == DS18B20_STATUS_NO_MORE_DEVICES) {
+      break;
+    }
+    CHECK(status == DS18B20_STATUS_OK);
+    CHECK(ds18b20_rom_is_valid(&found[count]));
+    count++;
+  }
+  CHECK(count == 3U);
+
+  for (index = 0U; index < count; ++index) {
+    uint8_t matches = 0U;
+    uint8_t other;
+
+    for (other = 0U; other < 3U; ++other) {
+      if (memcmp(found[index].bytes, bus.devices[other].rom,
+                 DS18B20_ROM_SIZE) == 0) {
+        matches++;
+      }
+    }
+    CHECK(matches == 1U);
+  }
+}
+
 static void test_scratchpad_read_and_errors(void)
 {
   fake_bus_t bus = make_bus(2U);
@@ -498,6 +546,7 @@ int main(void)
 {
   test_crc_and_rom_validation();
   test_search_three_devices();
+  test_search_keeps_previous_rom_bits();
   test_scratchpad_read_and_errors();
   test_reset_failures();
   printf("DS18B20 host tests: %u checks, %u failures\n",

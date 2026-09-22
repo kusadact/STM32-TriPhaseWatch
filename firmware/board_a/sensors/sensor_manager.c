@@ -140,10 +140,27 @@ bool board_a_sensor_manager_set_map(
     board_a_sensor_manager_t *manager,
     const board_a_sensor_map_t *map)
 {
+  uint8_t index;
+
   if ((manager == NULL) || !map_is_valid(map)) {
     return false;
   }
   manager->map = *map;
+  /*
+   * `bound` is derived state: callers may hand in a map whose flag does not
+   * match the valid mask, so normalise it (and the ROM short id, which is
+   * derived from the ROM bytes) here instead of trusting the input.
+   */
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    manager->map.bindings[index].bound =
+        (map->valid_mask & (uint8_t)(1U << index)) != 0U;
+    if (manager->map.bindings[index].bound) {
+      manager->map.bindings[index].rom_short =
+          rom_short_id(manager->map.bindings[index].rom);
+    } else {
+      manager->map.bindings[index].rom_short = 0U;
+    }
+  }
   manager->map_dirty = false;
   manager->discovery_complete =
       (map->valid_mask == BOARD_A_SENSOR_ALL_BOUND_MASK);
