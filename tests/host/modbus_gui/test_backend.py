@@ -69,7 +69,7 @@ class FakeService:
         self.calls.append(("read_temperature_snapshot",))
         return {
             "sample_id": 9,
-            "source": "DHT11",
+            "source": "REAL_DS18B20",
             "sensors": [],
         }
 
@@ -149,6 +149,10 @@ class BackendTests(unittest.TestCase):
         singled = backend.single_sample(42)
 
         self.assertEqual(polled["temperature_snapshot"]["sample_id"], 9)
+        self.assertEqual(
+            polled["temperature_snapshot"]["source"],
+            "REAL_DS18B20",
+        )
         self.assertEqual(singled["temperature_snapshot"]["sample_id"], 9)
         self.assertEqual(
             service.calls,

@@ -350,7 +350,7 @@ class GuiController:
         if isinstance(sensor_error, Mapping):
             self.state.last_note = (
                 "单次命令已接受；"
-                + str(sensor_error.get("message", "温湿度接口未冻结"))
+                + str(sensor_error.get("message", "温度接口未冻结"))
             )
 
     def _handle_failure(self, operation: str, error: Exception) -> None:

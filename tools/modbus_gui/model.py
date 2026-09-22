@@ -11,11 +11,11 @@ from typing import Any, Mapping, Sequence
 
 
 SENSOR_LAYOUT = (
-    (0, "DHT11-0", "PG9 / 1WIRE_DQ"),
-    (1, "DHT11-1", "PF6 / GBC_KEY"),
-    (2, "DHT11-2", "PE5 / DCMI_D6"),
+    (0, "DS18B20-0", "PG9 / 1-Wire"),
+    (1, "DS18B20-1", "PG9 / 1-Wire"),
+    (2, "DS18B20-2", "PG9 / 1-Wire"),
 )
-ALLOWED_SENSOR_SOURCES = {"NONE", "DHT11", "REAL_DHT11"}
+ALLOWED_SENSOR_SOURCES = {"NONE", "DS18B20", "REAL_DS18B20"}
 
 
 class SnapshotFormatError(ValueError):
@@ -42,7 +42,7 @@ class AcquisitionPhase(str, Enum):
 class Quality(str, Enum):
     OK = "OK"
     TIMEOUT = "TIMEOUT"
-    CHECKSUM_ERROR = "CHECKSUM_ERROR"
+    CRC_ERROR = "CRC_ERROR"
     RANGE_ERROR = "RANGE_ERROR"
     STALE = "STALE"
     NOT_PRESENT = "NOT_PRESENT"
@@ -53,10 +53,8 @@ class Quality(str, Enum):
 QUALITY_ALIASES = {
     "OK": Quality.OK,
     "TIMEOUT": Quality.TIMEOUT,
-    "TIMEOUT_RESPONSE": Quality.TIMEOUT,
-    "TIMEOUT_BIT": Quality.TIMEOUT,
-    "CHECKSUM": Quality.CHECKSUM_ERROR,
-    "CHECKSUM_ERROR": Quality.CHECKSUM_ERROR,
+    "CRC_ERROR": Quality.CRC_ERROR,
+    "CHECKSUM_ERROR": Quality.CRC_ERROR,
     "RANGE_ERROR": Quality.RANGE_ERROR,
     "STALE": Quality.STALE,
     "NOT_PRESENT": Quality.NOT_PRESENT,
@@ -66,7 +64,7 @@ QUALITY_ALIASES = {
 QUALITY_LABELS = {
     Quality.OK: "OK",
     Quality.TIMEOUT: "超时",
-    Quality.CHECKSUM_ERROR: "校验失败",
+    Quality.CRC_ERROR: "校验失败",
     Quality.RANGE_ERROR: "范围错误",
     Quality.STALE: "旧值",
     Quality.NOT_PRESENT: "未接入",
@@ -82,11 +80,21 @@ def normalize_quality(value: Any) -> Quality:
     return QUALITY_ALIASES.get(key, Quality.UNKNOWN)
 
 
-def _optional_x10(value: Any, name: str) -> int | None:
+def _optional_x16(value: Any, name: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise SnapshotFormatError(f"{name} must be an integer or null")
+    return value
+
+
+def _optional_rom_short(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SnapshotFormatError("rom_short must be an integer or null")
+    if not 0 <= value <= 0xFFFF:
+        raise SnapshotFormatError("rom_short must fit in 16 bits")
     return value
 
 
@@ -101,9 +109,9 @@ def _optional_int(value: Any, name: str) -> int | None:
 @dataclass(frozen=True)
 class SensorReading:
     sensor_id: int
-    temperature_x10: int | None
-    humidity_x10: int | None
+    temperature_x16: int | None
     quality: Quality
+    rom_short: int | None = None
     sample_time: Any = None
     source: str | None = None
     received_at: datetime | None = None
@@ -120,21 +128,18 @@ class SensorReading:
         if isinstance(sensor_id, bool) or not isinstance(sensor_id, int):
             raise SnapshotFormatError("sensor_id must be an integer")
         quality = normalize_quality(payload.get("quality", "UNKNOWN"))
-        temperature = _optional_x10(
-            payload.get("temperature_x10"),
-            "temperature_x10",
+        temperature = _optional_x16(
+            payload.get("temperature_x16"),
+            "temperature_x16",
         )
-        humidity = _optional_x10(payload.get("humidity_x10"), "humidity_x10")
+        rom_short = _optional_rom_short(payload.get("rom_short"))
 
-        if quality is Quality.OK and (
-            temperature is None or humidity is None
-        ):
+        if quality is Quality.OK and temperature is None:
             raise SnapshotFormatError(
-                "sensor quality OK requires temperature_x10 and humidity_x10"
+                "sensor quality OK requires temperature_x16"
             )
         if quality not in (Quality.OK, Quality.STALE):
             temperature = None
-            humidity = None
 
         source = payload.get("source")
         if source is not None and not isinstance(source, str):
@@ -142,9 +147,9 @@ class SensorReading:
         _validate_source(source)
         return cls(
             sensor_id=sensor_id,
-            temperature_x10=temperature,
-            humidity_x10=humidity,
+            temperature_x16=temperature,
             quality=quality,
+            rom_short=rom_short,
             sample_time=payload.get("sample_time"),
             source=source,
             received_at=received_at,
@@ -154,8 +159,7 @@ class SensorReading:
     def valid(self) -> bool:
         return (
             self.quality is Quality.OK
-            and self.temperature_x10 is not None
-            and self.humidity_x10 is not None
+            and self.temperature_x16 is not None
         )
 
     @property
@@ -164,11 +168,13 @@ class SensorReading:
 
     @property
     def temperature_text(self) -> str:
-        return _format_x10(self.temperature_x10, "°C")
+        return _format_x16(self.temperature_x16, "°C")
 
     @property
-    def humidity_text(self) -> str:
-        return _format_x10(self.humidity_x10, "%RH")
+    def rom_text(self) -> str:
+        if self.rom_short is None or self.rom_short == 0:
+            return "--"
+        return f"0x{self.rom_short:04X}"
 
     @property
     def sample_time_text(self) -> str:
@@ -235,8 +241,7 @@ class TemperatureSnapshot:
             if reading is None:
                 reading = SensorReading(
                     sensor_id=sensor_id,
-                    temperature_x10=None,
-                    humidity_x10=None,
+                    temperature_x16=None,
                     quality=Quality.NOT_PRESENT,
                     source=source,
                     received_at=received_at,
@@ -262,12 +267,10 @@ class TemperatureSnapshot:
 @dataclass(frozen=True)
 class SensorStatistics:
     valid_sensor_ids: tuple[int, ...] = ()
-    minimum_temperature_x10: int | None = None
-    maximum_temperature_x10: int | None = None
-    median_temperature_x10: float | None = None
-    minimum_humidity_x10: int | None = None
-    maximum_humidity_x10: int | None = None
-    maximum_temperature_delta_x10: int | None = None
+    minimum_temperature_x16: int | None = None
+    maximum_temperature_x16: int | None = None
+    median_temperature_x16: float | None = None
+    maximum_temperature_delta_x16: int | None = None
 
     @classmethod
     def calculate(
@@ -281,14 +284,9 @@ class SensorStatistics:
             return cls()
 
         temperatures = [
-            reading.temperature_x10
+            reading.temperature_x16
             for reading in valid
-            if reading.temperature_x10 is not None
-        ]
-        humidities = [
-            reading.humidity_x10
-            for reading in valid
-            if reading.humidity_x10 is not None
+            if reading.temperature_x16 is not None
         ]
         minimum_temperature = min(temperatures) if temperatures else None
         maximum_temperature = max(temperatures) if temperatures else None
@@ -303,14 +301,12 @@ class SensorStatistics:
         )
         return cls(
             valid_sensor_ids=tuple(reading.sensor_id for reading in valid),
-            minimum_temperature_x10=minimum_temperature,
-            maximum_temperature_x10=maximum_temperature,
-            median_temperature_x10=(
+            minimum_temperature_x16=minimum_temperature,
+            maximum_temperature_x16=maximum_temperature,
+            median_temperature_x16=(
                 float(median(temperatures)) if temperatures else None
             ),
-            minimum_humidity_x10=min(humidities) if humidities else None,
-            maximum_humidity_x10=max(humidities) if humidities else None,
-            maximum_temperature_delta_x10=delta,
+            maximum_temperature_delta_x16=delta,
         )
 
     @property
@@ -321,32 +317,24 @@ class SensorStatistics:
     def participating_sensor_text(self) -> str:
         if not self.valid_sensor_ids:
             return "无有效样本"
-        names = [f"DHT11-{sensor_id}" for sensor_id in self.valid_sensor_ids]
+        names = [f"DS18B20-{sensor_id}" for sensor_id in self.valid_sensor_ids]
         return "参与计算: " + ", ".join(names)
 
     @property
     def minimum_temperature_text(self) -> str:
-        return _format_x10(self.minimum_temperature_x10, "°C")
+        return _format_x16(self.minimum_temperature_x16, "°C")
 
     @property
     def maximum_temperature_text(self) -> str:
-        return _format_x10(self.maximum_temperature_x10, "°C")
+        return _format_x16(self.maximum_temperature_x16, "°C")
 
     @property
     def median_temperature_text(self) -> str:
-        return _format_x10(self.median_temperature_x10, "°C")
-
-    @property
-    def minimum_humidity_text(self) -> str:
-        return _format_x10(self.minimum_humidity_x10, "%RH")
-
-    @property
-    def maximum_humidity_text(self) -> str:
-        return _format_x10(self.maximum_humidity_x10, "%RH")
+        return _format_x16(self.median_temperature_x16, "°C")
 
     @property
     def maximum_temperature_delta_text(self) -> str:
-        return _format_x10(self.maximum_temperature_delta_x10, "°C")
+        return _format_x16(self.maximum_temperature_delta_x16, "°C")
 
     @property
     def valid_count_text(self) -> str:
@@ -376,7 +364,7 @@ class SensorCardView:
     title: str
     location: str
     temperature_text: str
-    humidity_text: str
+    rom_text: str
     quality_text: str
     sample_time_text: str
     updated_at_text: str
@@ -475,8 +463,7 @@ class GuiState:
                 sensors=tuple(
                     SensorReading(
                         sensor_id=sensor_id,
-                        temperature_x10=None,
-                        humidity_x10=None,
+                        temperature_x16=None,
                         quality=Quality.TIMEOUT,
                         received_at=received_at,
                     )
@@ -492,8 +479,7 @@ class GuiState:
             sensors=tuple(
                 SensorReading(
                     sensor_id=sensor_id,
-                    temperature_x10=None,
-                    humidity_x10=None,
+                    temperature_x16=None,
                     quality=Quality.INTERFACE_UNAVAILABLE,
                     received_at=received_at,
                 )
@@ -551,7 +537,7 @@ class GuiState:
                         title=name,
                         location=location,
                         temperature_text="--",
-                        humidity_text="--",
+                        rom_text="--",
                         quality_text="等待采样",
                         sample_time_text="--",
                         updated_at_text="--",
@@ -563,7 +549,7 @@ class GuiState:
                     title=name,
                     location=location,
                     temperature_text=reading.temperature_text,
-                    humidity_text=reading.humidity_text,
+                    rom_text=reading.rom_text,
                     quality_text=reading.quality_label,
                     sample_time_text=reading.sample_time_text,
                     updated_at_text=reading.updated_at_text,
@@ -572,10 +558,10 @@ class GuiState:
         return tuple(cards)
 
 
-def _format_x10(value: int | float | None, unit: str) -> str:
+def _format_x16(value: int | float | None, unit: str) -> str:
     if value is None:
         return "--"
-    return f"{value / 10.0:.1f} {unit}"
+    return f"{value / 16.0:.2f} {unit}"
 
 
 def _format_time(value: Any) -> str:

@@ -16,18 +16,19 @@ from fake_backend import FakeBackend
 
 def sensor(
     sensor_id: int,
-    temperature_x10: int | None,
-    humidity_x10: int | None,
+    temperature_x16: int | None,
     quality: str,
+    *,
+    rom_short: int | None = None,
     sample_time: int | None = None,
 ) -> dict[str, object]:
     return {
         "sensor_id": sensor_id,
-        "temperature_x10": temperature_x10,
-        "humidity_x10": humidity_x10,
+        "temperature_x16": temperature_x16,
         "quality": quality,
+        "rom_short": rom_short,
         "sample_time": sample_time,
-        "source": "DHT11",
+        "source": "REAL_DS18B20",
     }
 
 
@@ -72,11 +73,11 @@ class ControllerTestCase(unittest.TestCase):
     def set_three_valid_sensors(self) -> None:
         self.backend.temperature_payload = {
             "sample_id": 101,
-            "source": "DHT11",
+            "source": "REAL_DS18B20",
             "sensors": [
-                sensor(0, 200, 600, "OK", 1000),
-                sensor(1, 250, 550, "OK", 1001),
-                sensor(2, 300, 500, "OK", 1002),
+                sensor(0, 320, "OK", rom_short=0x1200, sample_time=1000),
+                sensor(1, 400, "OK", rom_short=0x1201, sample_time=1001),
+                sensor(2, 480, "OK", rom_short=0x1202, sample_time=1002),
             ],
         }
 
@@ -90,13 +91,13 @@ class ControllerTests(ControllerTestCase):
         self.wait_idle()
 
         cards = self.controller.state.sensor_cards()
-        self.assertEqual(cards[0].temperature_text, "20.0 °C")
-        self.assertEqual(cards[1].humidity_text, "55.0 %RH")
+        self.assertEqual(cards[0].temperature_text, "20.00 °C")
+        self.assertEqual(cards[1].rom_text, "0x1201")
         self.assertEqual(cards[2].quality_text, "OK")
         self.assertEqual(self.controller.state.last_sample_id, 101)
         self.assertEqual(
             self.controller.state.statistics.median_temperature_text,
-            "25.0 °C",
+            "25.00 °C",
         )
         self.assertEqual(
             self.controller.state.statistics.valid_count_text,
@@ -107,14 +108,67 @@ class ControllerTests(ControllerTestCase):
             ["connect", "poll"],
         )
 
-    def test_checksum_error_only_excludes_that_card(self) -> None:
+    def test_rom_reorder_keeps_logical_sensor_names(self) -> None:
+        self.connect()
+        self.backend.temperature_payload = {
+            "sample_id": 105,
+            "source": "REAL_DS18B20",
+            "sensors": [
+                sensor(2, 480, "OK", rom_short=0x1202),
+                sensor(0, 320, "OK", rom_short=0x1200),
+                sensor(1, 400, "OK", rom_short=0x1201),
+            ],
+        }
+
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        cards = self.controller.state.sensor_cards()
+        self.assertEqual(
+            [card.rom_text for card in cards],
+            ["0x1200", "0x1201", "0x1202"],
+        )
+        self.assertEqual(
+            [card.temperature_text for card in cards],
+            ["20.00 °C", "25.00 °C", "30.00 °C"],
+        )
+
+    def test_one_dropped_probe_keeps_the_other_two_updating(self) -> None:
+        self.connect()
+        self.set_three_valid_sensors()
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        self.backend.temperature_payload = {
+            "sample_id": 106,
+            "source": "REAL_DS18B20",
+            "sensors": [
+                sensor(0, 328, "OK", rom_short=0x1200),
+                sensor(1, 0, "NOT_PRESENT"),
+                sensor(2, 488, "OK", rom_short=0x1202),
+            ],
+        }
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        cards = self.controller.state.sensor_cards()
+        self.assertEqual(cards[0].temperature_text, "20.50 °C")
+        self.assertEqual(cards[1].temperature_text, "--")
+        self.assertEqual(cards[1].quality_text, "未接入")
+        self.assertEqual(cards[2].temperature_text, "30.50 °C")
+        self.assertEqual(
+            self.controller.state.statistics.valid_sensor_ids,
+            (0, 2),
+        )
+
+    def test_crc_error_only_excludes_that_card(self) -> None:
         self.connect()
         self.backend.temperature_payload = {
             "sample_id": 102,
             "sensors": [
-                sensor(0, 200, 600, "OK"),
-                sensor(1, 0, 0, "CHECKSUM_ERROR"),
-                sensor(2, 300, 500, "OK"),
+                sensor(0, 320, "OK", rom_short=0x1200),
+                sensor(1, 0, "CRC_ERROR"),
+                sensor(2, 480, "OK", rom_short=0x1202),
             ],
         }
 
@@ -134,9 +188,9 @@ class ControllerTests(ControllerTestCase):
         self.backend.temperature_payload = {
             "sample_id": 103,
             "sensors": [
-                sensor(0, 200, 600, "OK"),
-                sensor(1, 210, 610, "OK"),
-                sensor(2, 0, 0, "NOT_PRESENT"),
+                sensor(0, 320, "OK", rom_short=0x1200),
+                sensor(1, 336, "OK", rom_short=0x1201),
+                sensor(2, 0, "NOT_PRESENT"),
             ],
         }
 
@@ -145,7 +199,7 @@ class ControllerTests(ControllerTestCase):
 
         card = self.controller.state.sensor_cards()[2]
         self.assertEqual(card.temperature_text, "--")
-        self.assertEqual(card.humidity_text, "--")
+        self.assertEqual(card.rom_text, "--")
         self.assertEqual(card.quality_text, "未接入")
 
     def test_all_invalid_sensors_report_no_valid_samples(self) -> None:
@@ -153,9 +207,9 @@ class ControllerTests(ControllerTestCase):
         self.backend.temperature_payload = {
             "sample_id": 104,
             "sensors": [
-                sensor(0, 0, 0, "TIMEOUT"),
-                sensor(1, 0, 0, "CHECKSUM_ERROR"),
-                sensor(2, 0, 0, "RANGE_ERROR"),
+                sensor(0, 0, "TIMEOUT"),
+                sensor(1, 0, "CRC_ERROR"),
+                sensor(2, 0, "RANGE_ERROR"),
             ],
         }
 
@@ -167,11 +221,11 @@ class ControllerTests(ControllerTestCase):
         self.assertEqual(statistics.minimum_temperature_text, "--")
         self.assertEqual(statistics.participating_sensor_text, "无有效样本")
 
-    def test_missing_dht_interface_is_honest_and_does_not_show_test_count(self) -> None:
+    def test_missing_temperature_interface_is_honest(self) -> None:
         self.backend.temperature_payload = None
         self.backend.sensor_error = {
             "kind": "unsupported_protocol",
-            "message": "DHT11 interface is not frozen",
+            "message": "DS18B20 interface is not frozen",
             "interface_unavailable": True,
         }
         self.connect()
@@ -199,7 +253,7 @@ class ControllerTests(ControllerTestCase):
 
         state = self.controller.state
         self.assertEqual(state.connection, ConnectionState.DEVICE_UNRESPONSIVE)
-        self.assertEqual(state.sensor_cards()[0].temperature_text, "20.0 °C")
+        self.assertEqual(state.sensor_cards()[0].temperature_text, "20.00 °C")
         self.assertEqual(state.sensor_cards()[0].quality_text, "旧值")
         self.assertFalse(state.statistics.has_valid_samples)
         self.assertTrue(state.availability().disconnect)

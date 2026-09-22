@@ -46,7 +46,7 @@ class FakeBackend:
         }
         self.temperature_payload: Any = {
             "sample_id": 1,
-            "source": "DHT11",
+            "source": "REAL_DS18B20",
             "sensors": [],
         }
         self.sensor_error: Any = None

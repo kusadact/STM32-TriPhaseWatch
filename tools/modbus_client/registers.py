@@ -43,24 +43,27 @@ DATA_SOURCE_NAMES = {
     0: "NONE",
     1: "TEST",
     2: "REAL_DHT11",
+    3: "REAL_DS18B20",
 }
 
-DHT11_QUALITY_NAMES = {
+DS18B20_QUALITY_NAMES = {
     1: "OK",
     2: "TIMEOUT",
-    3: "CHECKSUM_ERROR",
+    3: "CRC_ERROR",
     4: "RANGE_ERROR",
     5: "STALE",
     6: "NOT_PRESENT",
 }
 
-DHT11_ERROR_NAMES = {
+DS18B20_ERROR_NAMES = {
     0: "NONE",
-    1: "TIMEOUT_RESPONSE",
-    2: "TIMEOUT_BIT",
-    3: "CHECKSUM",
-    4: "RANGE",
-    5: "TOO_SOON",
+    1: "RESET_TIMEOUT",
+    2: "BUS_STUCK_LOW",
+    3: "ROM_CRC",
+    4: "ROM_FAMILY",
+    5: "SEARCH",
+    6: "SCRATCHPAD_CRC",
+    7: "RANGE",
     255: "DRIVER",
 }
 
@@ -140,6 +143,10 @@ STATS_FIELDS = (
 
 def _word32(high: int, low: int) -> int:
     return (high << 16) | low
+
+
+def _i16(value: int) -> int:
+    return value - 0x10000 if value & 0x8000 else value
 
 
 def _require_length(values: Sequence[int], expected: int, name: str) -> None:
@@ -227,33 +234,31 @@ def decode_snapshot(values: Sequence[int]) -> dict[str, Any]:
     }
 
 
-def decode_dht11_snapshot(values: Sequence[int]) -> dict[str, Any]:
-    """Decode the 24-register DHT11 extension block at input 0x00B0."""
+def decode_ds18b20_snapshot(values: Sequence[int]) -> dict[str, Any]:
+    """Decode the 24-register DS18B20 extension block at input 0x00B0."""
 
-    _require_length(values, 24, "DHT11 snapshot")
+    _require_length(values, 24, "DS18B20 snapshot")
     source = values[1]
     valid_mask = values[2]
     sensors = []
     for index in range(3):
-        quality = values[11 + index]
-        error = values[14 + index]
-        sample_time_offset = 17 + (index * 2)
+        quality = values[8 + index]
+        error = values[11 + index]
+        sample_time_offset = 14 + (index * 2)
         sensors.append(
             {
                 "sensor_id": index,
-                "sensor_type": "DHT11",
+                "sensor_type": "DS18B20",
                 "valid": bool(valid_mask & (1 << index)),
-                "temperature_x10": values[5 + index],
-                "temperature_unit": "0.1degC",
-                "humidity_x10": values[8 + index],
-                "humidity_unit": "0.1%RH",
+                "temperature_x16": _i16(values[5 + index]),
+                "temperature_unit": "1/16degC",
                 "quality_code": quality,
-                "quality": DHT11_QUALITY_NAMES.get(
+                "quality": DS18B20_QUALITY_NAMES.get(
                     quality,
                     f"UNKNOWN({quality})",
                 ),
                 "error_code": error,
-                "error": DHT11_ERROR_NAMES.get(
+                "error": DS18B20_ERROR_NAMES.get(
                     error,
                     f"UNKNOWN({error})",
                 ),
@@ -261,6 +266,7 @@ def decode_dht11_snapshot(values: Sequence[int]) -> dict[str, Any]:
                     values[sample_time_offset],
                     values[sample_time_offset + 1],
                 ),
+                "rom_short": values[21 + index],
             }
         )
     return {
@@ -270,7 +276,7 @@ def decode_dht11_snapshot(values: Sequence[int]) -> dict[str, Any]:
         "valid_mask": valid_mask,
         "sample_id": _word32(values[3], values[4]),
         "sensors": sensors,
-        "sensor_type_code": values[23],
+        "sensor_type_code": values[20],
     }
 
 

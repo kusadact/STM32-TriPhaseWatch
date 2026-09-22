@@ -119,7 +119,7 @@ class ModbusServiceBackend:
         if not callable(method):
             raise UnsupportedProtocolError(
                 "当前 service 没有 read_temperature_snapshot()；"
-                "无法读取 DHT11 温湿度接口",
+                "无法读取 DS18B20 温度接口",
                 interface_unavailable=True,
             )
         return method()

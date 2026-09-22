@@ -8,7 +8,7 @@ from typing import Callable
 
 from .backend import ModbusServiceBackend
 from .controller import GuiController
-from .model import ConnectionState
+from .model import SENSOR_LAYOUT, ConnectionState
 from .ports import list_serial_ports
 
 
@@ -44,8 +44,6 @@ class GuiApplication:
             "minimum_temperature": tk.StringVar(value="--"),
             "maximum_temperature": tk.StringVar(value="--"),
             "median_temperature": tk.StringVar(value="--"),
-            "minimum_humidity": tk.StringVar(value="--"),
-            "maximum_humidity": tk.StringVar(value="--"),
             "maximum_delta": tk.StringVar(value="--"),
             "valid_count": tk.StringVar(value="0 / 3"),
             "participating": tk.StringVar(value="参与计算: 无"),
@@ -68,7 +66,7 @@ class GuiApplication:
         self.card_vars = [
             {
                 "temperature": tk.StringVar(value="--"),
-                "humidity": tk.StringVar(value="--"),
+                "rom": tk.StringVar(value="--"),
                 "quality": tk.StringVar(value="等待采样"),
                 "sample_time": tk.StringVar(value="--"),
                 "updated_at": tk.StringVar(value="--"),
@@ -83,7 +81,7 @@ class GuiApplication:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def _build_window(self) -> None:
-        self.root.title("STM32 板 A 环境温湿度监控")
+        self.root.title("STM32 板 A DS18B20 温度监控")
         self.root.minsize(1040, 720)
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(4, weight=1)
@@ -183,17 +181,12 @@ class GuiApplication:
         )
 
     def _build_cards(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="三路 DHT11 环境温湿度")
+        frame = ttk.LabelFrame(self.root, text="三路 DS18B20 温度（共用 PG9 / 1-Wire）")
         frame.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
         for column in range(3):
             frame.columnconfigure(column, weight=1, uniform="sensor")
 
-        labels = (
-            (0, "DHT11-0", "PG9 / 1WIRE_DQ"),
-            (1, "DHT11-1", "PF6 / GBC_KEY"),
-            (2, "DHT11-2", "PE5 / DCMI_D6"),
-        )
-        for column, title, location in labels:
+        for column, title, location in SENSOR_LAYOUT:
             card = ttk.LabelFrame(frame, text=title)
             card.grid(
                 row=0,
@@ -223,7 +216,7 @@ class GuiApplication:
                 textvariable=self.card_vars[column]["temperature"],
                 style="CardValue.TLabel",
             ).grid(row=1, column=1, sticky="e", padx=8, pady=3)
-            ttk.Label(card, text="相对湿度").grid(
+            ttk.Label(card, text="ROM 短标识").grid(
                 row=2,
                 column=0,
                 sticky="w",
@@ -232,8 +225,7 @@ class GuiApplication:
             )
             ttk.Label(
                 card,
-                textvariable=self.card_vars[column]["humidity"],
-                style="CardValue.TLabel",
+                textvariable=self.card_vars[column]["rom"],
             ).grid(row=2, column=1, sticky="e", padx=8, pady=3)
             ttk.Label(card, text="quality").grid(
                 row=3,
@@ -276,8 +268,6 @@ class GuiApplication:
             ("温度最小", "minimum_temperature"),
             ("温度最大", "maximum_temperature"),
             ("温度中位数", "median_temperature"),
-            ("湿度最小", "minimum_humidity"),
-            ("湿度最大", "maximum_humidity"),
             ("最大温差", "maximum_delta"),
             ("在线节点", "valid_count"),
         )
@@ -465,7 +455,8 @@ class GuiApplication:
         ttk.Label(
             frame,
             text=(
-                "说明：DHT11 显示的是环境温湿度，不是水温或精密测量。"
+                "说明：DS18B20 显示的是 PG9 1-Wire 总线温度读数，"
+                "显示精度不代表传感器精度。"
                 "GUI 的所有设备请求均通过高层 service 在 worker 线程执行。"
             ),
             wraplength=980,
@@ -524,7 +515,7 @@ class GuiApplication:
         for index, card in enumerate(state.sensor_cards()):
             values = self.card_vars[index]
             values["temperature"].set(card.temperature_text)
-            values["humidity"].set(card.humidity_text)
+            values["rom"].set(card.rom_text)
             values["quality"].set(card.quality_text)
             values["sample_time"].set(card.sample_time_text)
             values["updated_at"].set(card.updated_at_text)
@@ -538,12 +529,6 @@ class GuiApplication:
         )
         self.statistics_vars["median_temperature"].set(
             stats.median_temperature_text
-        )
-        self.statistics_vars["minimum_humidity"].set(
-            stats.minimum_humidity_text
-        )
-        self.statistics_vars["maximum_humidity"].set(
-            stats.maximum_humidity_text
         )
         self.statistics_vars["maximum_delta"].set(
             stats.maximum_temperature_delta_text
