@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from tools.modbus_gui.controller import GuiController
-from tools.modbus_gui.model import TemperatureSnapshot
+from tools.modbus_gui.model import (
+    AlarmSnapshot,
+    ConnectionState,
+    TemperatureSnapshot,
+)
 from fake_backend import FakeBackend
 
 try:
@@ -102,6 +106,75 @@ class UiSmokeTests(unittest.TestCase):
             self.assertNotIn("humidity", app.card_vars[0])
             self.assertNotIn("minimum_humidity", app.statistics_vars)
             self.assertNotIn("maximum_humidity", app.statistics_vars)
+            app.close()
+        finally:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+            controller.shutdown(timeout=0.5)
+
+    def test_render_shows_three_phase_alarm_and_ack_button(self) -> None:
+        root, controller, app = self._application()
+        try:
+            controller.state.connection = ConnectionState.CONNECTED
+            controller.state.session_open = True
+            controller.state.set_alarm(
+                AlarmSnapshot.from_payload(
+                    {
+                        "contract_revision": 1,
+                        "valid": True,
+                        "level": "CRITICAL",
+                        "reason": "PHASE_TEMPERATURE_HIGH",
+                        "flags": {
+                            "valid": True,
+                            "latched": True,
+                            "acknowledged": False,
+                            "buzzer_active": True,
+                        },
+                        "trigger_phase": "B",
+                        "delta_valid": True,
+                        "maximum_delta_x16": 160,
+                        "hottest_temperature_x16": 1200,
+                        "hottest_phase": "B",
+                        "phases": [
+                            {
+                                "phase": "A",
+                                "temperature_x16": 1040,
+                                "quality": "OK",
+                            },
+                            {
+                                "phase": "B",
+                                "temperature_x16": 1200,
+                                "quality": "OK",
+                            },
+                            {
+                                "phase": "C",
+                                "temperature_x16": None,
+                                "quality": "CRC_ERROR",
+                            },
+                        ],
+                        "event_id": 4,
+                        "alarm_sample_id": 55,
+                        "duration_sec": 9,
+                        "notice_count": 0,
+                        "warning_count": 0,
+                        "critical_count": 1,
+                        "sensor_fault_count": 0,
+                    }
+                )
+            )
+            app._render()
+
+            self.assertEqual(
+                app.alarm_vars["level"].get(),
+                "CRITICAL / 严重",
+            )
+            self.assertEqual(app.alarm_vars["trigger_phase"].get(), "B 相")
+            self.assertEqual(app.alarm_vars["maximum_delta"].get(), "10.00 °C")
+            self.assertEqual(app.alarm_vars["buzzer"].get(), "蜂鸣中")
+            self.assertEqual(app.card_status_labels[0].cget("background"), "#dc2626")
+            self.assertEqual(app.ack_button.instate(["!disabled"]), True)
             app.close()
         finally:
             try:

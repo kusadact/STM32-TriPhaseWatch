@@ -32,6 +32,38 @@ def sensor(
     }
 
 
+def alarm_payload(*, acknowledged: bool = False) -> dict[str, object]:
+    return {
+        "contract_revision": 1,
+        "valid": True,
+        "level": "NOTICE",
+        "reason": "PHASE_DELTA_HIGH",
+        "flags": {
+            "valid": True,
+            "latched": True,
+            "acknowledged": acknowledged,
+            "buzzer_active": not acknowledged,
+        },
+        "trigger_phase": "A",
+        "delta_valid": True,
+        "maximum_delta_x16": 160,
+        "hottest_temperature_x16": 480,
+        "hottest_phase": "A",
+        "phases": [
+            {"phase": "A", "temperature_x16": 480, "quality": "OK"},
+            {"phase": "B", "temperature_x16": 320, "quality": "OK"},
+            {"phase": "C", "temperature_x16": 320, "quality": "OK"},
+        ],
+        "event_id": 3,
+        "alarm_sample_id": 101,
+        "duration_sec": 12,
+        "notice_count": 1,
+        "warning_count": 0,
+        "critical_count": 0,
+        "sensor_fault_count": 0,
+    }
+
+
 class ControllerTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.backend = FakeBackend()
@@ -83,6 +115,39 @@ class ControllerTestCase(unittest.TestCase):
 
 
 class ControllerTests(ControllerTestCase):
+    def test_thermal_alarm_is_rendered_and_acknowledged(self) -> None:
+        self.backend.alarm_payload = alarm_payload()
+        self.connect()
+        self.set_three_valid_sensors()
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+
+        state = self.controller.state
+        self.assertIsNotNone(state.alarm)
+        self.assertEqual(state.alarm.level.value, "NOTICE")
+        self.assertEqual(state.alarm.maximum_delta_text, "10.00 °C")
+        self.assertTrue(state.availability().ack_alarm)
+
+        self.backend.ack_results.append(
+            {
+                "duplicate": False,
+                "command_id": 7,
+                "thermal_alarm": alarm_payload(acknowledged=True),
+                "acknowledged": True,
+            }
+        )
+        self.assertTrue(self.controller.ack_alarm())
+        self.wait_idle()
+
+        self.assertTrue(self.controller.state.alarm.acknowledged)
+        self.assertEqual(self.controller.state.alarm.level.value, "NOTICE")
+        self.assertEqual(
+            self.controller.state.alarm.maximum_delta_text,
+            "10.00 °C",
+        )
+        self.assertFalse(self.controller.state.availability().ack_alarm)
+        self.assertIn("ack_alarm", [event[0] for event in self.backend.events])
+
     def test_all_ok_cards_and_statistics(self) -> None:
         self.connect()
         self.set_three_valid_sensors()
@@ -400,6 +465,10 @@ class ControllerTests(ControllerTestCase):
     def test_background_poll_keeps_ui_usable_and_queues_user_action(self) -> None:
         self.connect()
         self.set_three_valid_sensors()
+        self.backend.alarm_payload = alarm_payload()
+        self.assertTrue(self.controller.refresh_sensors())
+        self.wait_idle()
+        self.backend.events.clear()
         self.backend.poll_delay = 0.20
 
         # A tick-driven poll is background work: it must not disable the UI.
@@ -413,6 +482,7 @@ class ControllerTests(ControllerTestCase):
         self.assertIn("poll", [event[0] for event in self.backend.events])
         self.assertFalse(self.controller.state.is_busy)
         self.assertTrue(self.controller.state.availability().single_sample)
+        self.assertTrue(self.controller.state.availability().ack_alarm)
 
         # A user action submitted while that poll is running is queued, not lost.
         self.assertTrue(self.controller.single_sample())

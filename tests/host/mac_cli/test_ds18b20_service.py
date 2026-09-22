@@ -12,8 +12,15 @@ from tools.modbus_client.errors import (
 )
 from tools.modbus_client.protocol import FUNCTION_READ_INPUT, append_crc
 from tools.modbus_client.service import (
+    COMMAND_ACK_ALARM,
+    HOLDING_ALARM_CONFIG_COUNT,
+    HOLDING_ALARM_CONFIG_START,
     INPUT_DS18B20_COUNT,
     INPUT_DS18B20_START,
+    INPUT_THERMAL_ALARM_COUNT,
+    INPUT_THERMAL_ALARM_START,
+    INPUT_THERMAL_STATE_COUNT,
+    INPUT_THERMAL_STATE_START,
     ModbusService,
 )
 from fake_transport import ScriptedTransport
@@ -60,6 +67,102 @@ def ds18b20_values(
     values[20] = sensor_type
     values[21:24] = rom_shorts
     return tuple(values)
+
+
+def thermal_alarm_values(
+    *,
+    revision: int = 1,
+    level: int = 1,
+    reason: int = 2,
+    flags: int = 0x0B,
+    trigger_phase: int = 1,
+    delta_valid: int = 1,
+    maximum_delta_x16: int = 160,
+    hottest_temperature_x16: int = 480,
+    hottest_phase: int = 1,
+    temperatures: tuple[int, int, int] = (480, 320, 320),
+    qualities: tuple[int, int, int] = (1, 1, 1),
+    event_id: int = 7,
+    alarm_sample_id: int = 1,
+    duration_sec: int = 12,
+    notice_count: int = 1,
+    warning_count: int = 0,
+    critical_count: int = 0,
+    sensor_fault_count: int = 0,
+) -> tuple[int, ...]:
+    values = [0] * INPUT_THERMAL_ALARM_COUNT
+    values[0] = revision
+    values[1] = level
+    values[2] = reason
+    values[3] = flags
+    values[4] = trigger_phase
+    values[5] = delta_valid
+    values[6] = maximum_delta_x16 & 0xFFFF
+    values[7] = hottest_temperature_x16 & 0xFFFF
+    values[8] = hottest_phase
+    values[9:12] = [value & 0xFFFF for value in temperatures]
+    values[12:15] = qualities
+    values[15] = (event_id >> 16) & 0xFFFF
+    values[16] = event_id & 0xFFFF
+    values[17] = (alarm_sample_id >> 16) & 0xFFFF
+    values[18] = alarm_sample_id & 0xFFFF
+    values[19] = (duration_sec >> 16) & 0xFFFF
+    values[20] = duration_sec & 0xFFFF
+    values[21] = (notice_count >> 16) & 0xFFFF
+    values[22] = notice_count & 0xFFFF
+    values[23] = (warning_count >> 16) & 0xFFFF
+    values[24] = warning_count & 0xFFFF
+    values[25] = (critical_count >> 16) & 0xFFFF
+    values[26] = critical_count & 0xFFFF
+    values[27] = (sensor_fault_count >> 16) & 0xFFFF
+    values[28] = sensor_fault_count & 0xFFFF
+    return tuple(values)
+
+
+def write_response(request: bytes) -> bytes:
+    return append_crc(request[:6])
+
+
+def observation_values(
+    *,
+    command: int,
+    result: int,
+    command_id: int,
+) -> tuple[int, ...]:
+    return (
+        0,
+        1,
+        10,
+        1,
+        0,
+        0,
+        0,
+        command,
+        result,
+        (command_id >> 16) & 0xFFFF,
+        command_id & 0xFFFF,
+    )
+
+
+def alarm_config_values() -> tuple[int, ...]:
+    return (
+        50 * 16,
+        55 * 16,
+        75 * 16,
+        5 * 16,
+        10 * 16,
+        15 * 16,
+        5 * 16,
+        10 * 16,
+        20 * 16,
+        3,
+        5,
+        2 * 16,
+        4,
+        0,
+        1000,
+        1,
+    )
 
 
 class Ds18b20ServiceTests(unittest.TestCase):
@@ -342,6 +445,150 @@ class Ds18b20ServiceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.details["sensor_id"], 0)
         self.assertEqual(raised.exception.details["valid_mask"], 0x0006)
+
+    def test_thermal_state_reads_temperature_and_alarm_in_one_transaction(
+        self,
+    ) -> None:
+        values = ds18b20_values(
+            sample_id=0x12345678,
+            temperatures=(480, 320, 320),
+            qualities=(1, 1, 1),
+        ) + thermal_alarm_values(
+            alarm_sample_id=0x12345678,
+            event_id=9,
+        )
+        service, client, transport = self._service(
+            lambda request: read_response(request, values)
+        )
+        try:
+            state = service.read_thermal_state()
+        finally:
+            client.close()
+
+        self.assertEqual(len(transport.writes), 1)
+        self.assertEqual(
+            struct.unpack_from(">HH", transport.writes[0], 2),
+            (INPUT_THERMAL_STATE_START, INPUT_THERMAL_STATE_COUNT),
+        )
+        self.assertEqual(state["temperature_snapshot"]["sample_id"], 0x12345678)
+        self.assertEqual(state["thermal_alarm"]["level"], "NOTICE")
+        self.assertEqual(state["alarm"]["event_id"], 9)
+        self.assertEqual(
+            state["thermal_alarm"]["phases"][0]["temperature_x16"],
+            480,
+        )
+
+    def test_thermal_state_rejects_cross_block_sample_id_mismatch(self) -> None:
+        values = ds18b20_values(sample_id=10) + thermal_alarm_values(
+            alarm_sample_id=11
+        )
+        service, client, _transport = self._service(
+            lambda request: read_response(request, values)
+        )
+        try:
+            with self.assertRaises(ProtocolError) as raised:
+                service.read_thermal_state()
+        finally:
+            client.close()
+
+        self.assertEqual(
+            raised.exception.details["temperature_sample_id"],
+            10,
+        )
+        self.assertEqual(raised.exception.details["alarm_sample_id"], 11)
+
+    def test_standalone_alarm_read_and_ack_preserve_level(self) -> None:
+        alarm = thermal_alarm_values(
+            level=2,
+            reason=2,
+            flags=0x0B,
+            trigger_phase=1,
+            maximum_delta_x16=160,
+            hottest_temperature_x16=480,
+            temperatures=(480, 320, 320),
+            event_id=3,
+            alarm_sample_id=99,
+        )
+        command_id = 0x12345678
+        acknowledged = False
+
+        def handler(request: bytes) -> bytes:
+            nonlocal acknowledged
+            if request[1] != FUNCTION_READ_INPUT:
+                acknowledged = True
+                return write_response(request)
+            start = struct.unpack_from(">H", request, 2)[0]
+            if start == 0x0005:
+                return read_response(
+                    request,
+                    observation_values(
+                        command=COMMAND_ACK_ALARM,
+                        result=1,
+                        command_id=command_id,
+                    ),
+                )
+            if start == INPUT_THERMAL_ALARM_START:
+                current = list(alarm)
+                if acknowledged:
+                    current[3] |= 0x04
+                return read_response(request, tuple(current))
+            raise AssertionError(f"unexpected read address 0x{start:04X}")
+
+        service, client, transport = self._service(handler)
+        try:
+            read_alarm = service.read_thermal_alarm()
+            result = service.ack_alarm(command_id)
+        finally:
+            client.close()
+
+        self.assertEqual(read_alarm["level"], "WARNING")
+        self.assertEqual(result["command"]["last_command"]["name"], "ACK_ALARM")
+        self.assertEqual(result["thermal_alarm"]["level"], "WARNING")
+        self.assertTrue(result["thermal_alarm"]["acknowledged"])
+        self.assertFalse(result["duplicate"])
+        self.assertEqual(len(transport.writes), 4)
+        self.assertEqual(
+            struct.unpack_from(">HHH", transport.writes[1], 7),
+            (COMMAND_ACK_ALARM, 0x1234, 0x5678),
+        )
+
+    def test_read_alarm_config(self) -> None:
+        service, client, transport = self._service(
+            lambda request: read_response(request, alarm_config_values())
+        )
+        try:
+            config = service.read_alarm_config()
+        finally:
+            client.close()
+
+        self.assertEqual(config["phase_critical_x16"], 75 * 16)
+        self.assertEqual(config["assert_samples"], 3)
+        self.assertTrue(config["buzzer_enable"])
+        self.assertEqual(
+            struct.unpack_from(">HH", transport.writes[0], 2),
+            (HOLDING_ALARM_CONFIG_START, HOLDING_ALARM_CONFIG_COUNT),
+        )
+
+    def test_thermal_alarm_illegal_address_is_interface_unavailable(self) -> None:
+        service, client, transport = self._service(
+            lambda request: exception_response(request, 0x02)
+        )
+        try:
+            with self.assertRaises(UnsupportedProtocolError) as raised:
+                service.read_thermal_alarm()
+        finally:
+            client.close()
+
+        self.assertTrue(raised.exception.details["interface_unavailable"])
+        self.assertEqual(
+            raised.exception.details["start"],
+            INPUT_THERMAL_ALARM_START,
+        )
+        self.assertEqual(
+            raised.exception.details["count"],
+            INPUT_THERMAL_ALARM_COUNT,
+        )
+        self.assertEqual(len(transport.writes), 1)
 
 
 if __name__ == "__main__":
