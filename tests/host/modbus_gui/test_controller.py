@@ -260,7 +260,11 @@ class ControllerTests(ControllerTestCase):
         self.assertEqual(state.failed_count, 1)
 
         self.controller.tick(now=time.monotonic() + 60.0)
-        self.wait_idle()
+        # The recovery poll runs as background work, so wait for the state
+        # change instead of for the UI busy flag.
+        self.wait_until(
+            lambda: self.controller.state.connection is ConnectionState.CONNECTED
+        )
         self.assertEqual(self.controller.state.connection, ConnectionState.CONNECTED)
         self.assertEqual(self.controller.state.sensor_cards()[0].quality_text, "OK")
 
@@ -392,6 +396,38 @@ class ControllerTests(ControllerTestCase):
         self.assertTrue(exited)
         self.assertLess(elapsed, 0.5)
         self.assertIn("close", [event[0] for event in self.backend.events])
+
+    def test_background_poll_keeps_ui_usable_and_queues_user_action(self) -> None:
+        self.connect()
+        self.set_three_valid_sensors()
+        self.backend.poll_delay = 0.20
+
+        # A tick-driven poll is background work: it must not disable the UI.
+        self.assertTrue(self.controller.tick(now=time.monotonic() + 60.0))
+        deadline = time.monotonic() + 1.0
+        while (
+            "poll" not in [event[0] for event in self.backend.events]
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.001)
+        self.assertIn("poll", [event[0] for event in self.backend.events])
+        self.assertFalse(self.controller.state.is_busy)
+        self.assertTrue(self.controller.state.availability().single_sample)
+
+        # A user action submitted while that poll is running is queued, not lost.
+        self.assertTrue(self.controller.single_sample())
+        self.assertTrue(self.controller.state.is_busy)
+        self.wait_idle(timeout=2.0)
+
+        operations = [event[0] for event in self.backend.events]
+        self.assertIn("poll", operations)
+        self.assertIn("single_sample", operations)
+        self.assertLess(operations.index("poll"), operations.index("single_sample"))
+        self.assertEqual(self.controller.state.last_note, "单次采样完成")
+        self.assertEqual(
+            self.controller.state.sensor_cards()[0].temperature_text,
+            "20.00 °C",
+        )
 
     def test_shutdown_is_bounded_when_backend_call_blocks(self) -> None:
         started = threading.Event()
