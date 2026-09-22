@@ -64,6 +64,7 @@ class FakeBackend:
             "last_synced_seq": 0,
         }
         self.close_delay = 0.0
+        self.poll_delay = 0.0
         self.raise_on_close: BaseException | None = None
 
     def _record(self, name: str, *args: Any) -> None:
@@ -89,6 +90,8 @@ class FakeBackend:
 
     def poll(self) -> dict[str, Any]:
         self._record("poll")
+        if self.poll_delay > 0:
+            time.sleep(self.poll_delay)
         return _take(
             self.poll_results,
             {

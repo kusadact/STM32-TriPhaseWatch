@@ -52,7 +52,11 @@ class GuiController:
         self._clock = clock
         self._wall_clock = wall_clock
         self.state = GuiState()
-        self._pending_operation: str | None = None
+        # Worker operation id -> (operation name, is_background). Background
+        # polls must not gate the UI, so they are tracked separately from the
+        # one user-initiated operation that is allowed to be in flight.
+        self._pending: dict[int, tuple[str, bool]] = {}
+        self._pending_user_operation: str | None = None
         self._next_poll_at: float | None = None
         self._next_storage_at: float | None = None
         self._last_command_id = 0
@@ -177,14 +181,14 @@ class GuiController:
         now = self._clock() if now is None else now
         if self._next_poll_at is not None and now >= self._next_poll_at:
             self._next_poll_at = None
-            return self._submit("poll")
+            return self._submit("poll", background=True)
         if (
             self.state.connection is ConnectionState.CONNECTED
             and self._next_storage_at is not None
             and now >= self._next_storage_at
         ):
             self._next_storage_at = None
-            return self._submit("refresh_storage")
+            return self._submit("refresh_storage", background=True)
         return False
 
     def poll(self) -> None:
@@ -201,6 +205,8 @@ class GuiController:
         self._next_storage_at = None
         limit = self._close_timeout if timeout is None else timeout
         exited = self._worker.close(limit)
+        self._pending.clear()
+        self._pending_user_operation = None
         self.state.busy_operation = None
         self.state.connection = ConnectionState.DISCONNECTED
         self.state.session_open = False
@@ -210,23 +216,30 @@ class GuiController:
     def worker_close_error(self) -> Exception | None:
         return self._worker.close_error
 
-    def _submit(self, operation: str, *args: Any) -> bool:
-        if self._pending_operation is not None:
+    def _submit(
+        self, operation: str, *args: Any, background: bool = False
+    ) -> bool:
+        if self._closing:
+            return False
+        if not background and self._pending_user_operation is not None:
             return False
         try:
-            self._worker.submit(operation, *args)
+            operation_id = self._worker.submit(operation, *args)
         except Exception as exc:
-            self._pending_operation = None
-            self.state.busy_operation = None
             self._record_error(exc)
             return False
-        self._pending_operation = operation
-        self.state.busy_operation = operation
+        self._pending[operation_id] = (operation, background)
+        if not background:
+            self._pending_user_operation = operation
+            self.state.busy_operation = operation
         return True
 
     def _dispatch(self, result: OperationResult) -> None:
-        self.state.busy_operation = None
-        self._pending_operation = None
+        entry = self._pending.pop(result.operation_id, None)
+        background = bool(entry is not None and entry[1])
+        if not background:
+            self._pending_user_operation = None
+            self.state.busy_operation = None
         try:
             if result.error is not None:
                 self._handle_failure(result.operation, result.error)
