@@ -4,9 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define BOARD_A_CONFIG_PAYLOAD_SCHEMA 2U
+#include "../alarm/board_a_alarm.h"
+
+#define BOARD_A_CONFIG_PAYLOAD_SCHEMA 3U
 #define BOARD_A_CONFIG_PAYLOAD_SCHEMA1_SIZE 12U
-#define BOARD_A_CONFIG_PAYLOAD_SIZE 36U
+#define BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE 36U
+#define BOARD_A_CONFIG_PAYLOAD_SIZE 68U
 #define BOARD_A_RECORD_SCHEMA 3U
 #define BOARD_A_RECORD_CHANNEL_COUNT 4U
 #define BOARD_A_RECORD_DS18B20_COUNT 3U
@@ -19,6 +22,7 @@ typedef struct {
   uint16_t record_count;
   uint8_t sensor_valid_mask;
   uint8_t sensor_roms[BOARD_A_RECORD_DS18B20_COUNT][8];
+  board_a_alarm_config_t alarm;
 } board_a_persisted_config_t;
 
 typedef struct {

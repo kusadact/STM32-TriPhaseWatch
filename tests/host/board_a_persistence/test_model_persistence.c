@@ -13,6 +13,12 @@
     }                                                                        \
   } while (0)
 
+static void persisted_config_defaults(board_a_persisted_config_t *config)
+{
+  memset(config, 0, sizeof(*config));
+  board_a_alarm_default_config(&config->alarm);
+}
+
 static modbus_result_t write_config(board_a_model_t *model,
                                     uint16_t period,
                                     uint16_t mask,
@@ -45,9 +51,13 @@ static int test_save_mailbox_capture_and_busy(void)
   board_a_save_request_t request;
   board_a_persistence_status_t status;
   uint16_t persistence_registers[48];
+  uint16_t alarm_delta[3] = {96U, 176U, 256U};
 
   board_a_model_init(&model, 1U);
   CHECK(write_config(&model, 20U, 3U, 4U) == MODBUS_RESULT_OK);
+  CHECK(board_a_model_write_registers(
+            &model, BOARD_A_HOLDING_ALARM_DELTA_NOTICE, alarm_delta, 3U,
+            1000U) == MODBUS_RESULT_OK);
   CHECK(execute_command(&model, BOARD_A_COMMAND_APPLY_CONFIG, 0U, 1000U) ==
         MODBUS_RESULT_OK);
   CHECK(execute_command(&model, BOARD_A_COMMAND_SAVE_CONFIG,
@@ -55,6 +65,9 @@ static int test_save_mailbox_capture_and_busy(void)
   CHECK(model.persistence.save.state == BOARD_A_SAVE_PENDING);
   CHECK(model.persistence.save.request.command_id == 0x11223344U);
   CHECK(model.persistence.save.request.config.period_sec == 20U);
+  CHECK(model.persistence.save.request.config.alarm.delta_notice_x16 == 96);
+  CHECK(model.persistence.save.request.config.alarm.delta_warning_x16 == 176);
+  CHECK(model.persistence.save.request.config.alarm.delta_critical_x16 == 256);
   CHECK(execute_command(&model, BOARD_A_COMMAND_SAVE_CONFIG,
                         0x55667788U, 1200U) == MODBUS_RESULT_SLAVE_BUSY);
   CHECK(model.persistence.save.request.command_id == 0x11223344U);
@@ -95,12 +108,21 @@ static int test_save_failure_and_startup_load(void)
 {
   board_a_model_t model;
   board_a_save_request_t request;
-  board_a_persisted_config_t loaded = {45U, 9U, 12U, 0U, {{0U}}};
+  board_a_persisted_config_t loaded;
 
+  persisted_config_defaults(&loaded);
+  loaded.period_sec = 45U;
+  loaded.channel_mask = 9U;
+  loaded.record_count = 12U;
+  loaded.alarm.delta_notice_x16 = 96;
+  loaded.alarm.delta_warning_x16 = 176;
+  loaded.alarm.delta_critical_x16 = 256;
   board_a_model_init(&model, 2U);
   board_a_model_apply_loaded_config(&model, &loaded, 41U);
   CHECK(model.pending_config.period_sec == 45U);
   CHECK(model.active_config.config.channel_mask == 9U);
+  CHECK(model.pending_alarm_config.delta_notice_x16 == 96);
+  CHECK(model.active_config.alarm_config.delta_critical_x16 == 256);
   CHECK(model.persistence.config_load_state ==
         BOARD_A_CONFIG_LOAD_SUCCESS);
   CHECK(model.persistence.load_sequence == 41U);

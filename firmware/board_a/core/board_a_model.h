@@ -17,6 +17,8 @@
 #define BOARD_A_CHANNEL_MASK_MIN 0x0001U
 #define BOARD_A_CHANNEL_MASK_MAX 0x000FU
 #define BOARD_A_SINGLE_DEDUP_CAPACITY 16U
+#define BOARD_A_ALARM_INPUT_CONTRACT_REVISION 1U
+#define BOARD_A_ALARM_CONFIG_CONTRACT_REVISION 1U
 #define BOARD_A_TIME_INVALID_SECONDS 0xFFFFFFFFU
 
 enum {
@@ -29,7 +31,23 @@ enum {
   BOARD_A_HOLDING_PENDING_START_UTC_SECONDS_LO = 0x0023,
   BOARD_A_HOLDING_COMMAND = 0x0040,
   BOARD_A_HOLDING_COMMAND_ID_HI = 0x0041,
-  BOARD_A_HOLDING_COMMAND_ID_LO = 0x0042
+  BOARD_A_HOLDING_COMMAND_ID_LO = 0x0042,
+  BOARD_A_HOLDING_ALARM_CONFIG_REVISION = 0x0050,
+  BOARD_A_HOLDING_ALARM_PHASE_NOTICE = 0x0051,
+  BOARD_A_HOLDING_ALARM_PHASE_WARNING = 0x0052,
+  BOARD_A_HOLDING_ALARM_PHASE_CRITICAL = 0x0053,
+  BOARD_A_HOLDING_ALARM_DELTA_NOTICE = 0x0054,
+  BOARD_A_HOLDING_ALARM_DELTA_WARNING = 0x0055,
+  BOARD_A_HOLDING_ALARM_DELTA_CRITICAL = 0x0056,
+  BOARD_A_HOLDING_ALARM_RISE_NOTICE = 0x0057,
+  BOARD_A_HOLDING_ALARM_RISE_WARNING = 0x0058,
+  BOARD_A_HOLDING_ALARM_RISE_CRITICAL = 0x0059,
+  BOARD_A_HOLDING_ALARM_ASSERT_SAMPLES = 0x005A,
+  BOARD_A_HOLDING_ALARM_CLEAR_SAMPLES = 0x005B,
+  BOARD_A_HOLDING_ALARM_HYSTERESIS = 0x005C,
+  BOARD_A_HOLDING_ALARM_BUZZER_ENABLE = 0x005D,
+  BOARD_A_HOLDING_ALARM_RESERVED_0 = 0x005E,
+  BOARD_A_HOLDING_ALARM_RESERVED_1 = 0x005F
 };
 
 enum {
@@ -186,6 +204,38 @@ enum {
   BOARD_A_INPUT_DS18B20_ROM_SHORT_2 = 0x00C7
 };
 
+enum {
+  BOARD_A_INPUT_ALARM_CONTRACT_REVISION = 0x00C8,
+  BOARD_A_INPUT_ALARM_LEVEL = 0x00C9,
+  BOARD_A_INPUT_ALARM_REASON = 0x00CA,
+  BOARD_A_INPUT_ALARM_FLAGS = 0x00CB,
+  BOARD_A_INPUT_ALARM_TRIGGER_PHASE = 0x00CC,
+  BOARD_A_INPUT_ALARM_DELTA_VALID = 0x00CD,
+  BOARD_A_INPUT_ALARM_MAXIMUM_DELTA_X16 = 0x00CE,
+  BOARD_A_INPUT_ALARM_HOTTEST_TEMPERATURE_X16 = 0x00CF,
+  BOARD_A_INPUT_ALARM_HOTTEST_PHASE = 0x00D0,
+  BOARD_A_INPUT_ALARM_TEMPERATURE_A_X16 = 0x00D1,
+  BOARD_A_INPUT_ALARM_TEMPERATURE_B_X16 = 0x00D2,
+  BOARD_A_INPUT_ALARM_TEMPERATURE_C_X16 = 0x00D3,
+  BOARD_A_INPUT_ALARM_QUALITY_A = 0x00D4,
+  BOARD_A_INPUT_ALARM_QUALITY_B = 0x00D5,
+  BOARD_A_INPUT_ALARM_QUALITY_C = 0x00D6,
+  BOARD_A_INPUT_ALARM_EVENT_ID_HI = 0x00D7,
+  BOARD_A_INPUT_ALARM_EVENT_ID_LO = 0x00D8,
+  BOARD_A_INPUT_ALARM_SAMPLE_ID_HI = 0x00D9,
+  BOARD_A_INPUT_ALARM_SAMPLE_ID_LO = 0x00DA,
+  BOARD_A_INPUT_ALARM_DURATION_SEC_HI = 0x00DB,
+  BOARD_A_INPUT_ALARM_DURATION_SEC_LO = 0x00DC,
+  BOARD_A_INPUT_ALARM_NOTICE_COUNT_HI = 0x00DD,
+  BOARD_A_INPUT_ALARM_NOTICE_COUNT_LO = 0x00DE,
+  BOARD_A_INPUT_ALARM_WARNING_COUNT_HI = 0x00DF,
+  BOARD_A_INPUT_ALARM_WARNING_COUNT_LO = 0x00E0,
+  BOARD_A_INPUT_ALARM_CRITICAL_COUNT_HI = 0x00E1,
+  BOARD_A_INPUT_ALARM_CRITICAL_COUNT_LO = 0x00E2,
+  BOARD_A_INPUT_ALARM_SENSOR_FAULT_COUNT_HI = 0x00E3,
+  BOARD_A_INPUT_ALARM_SENSOR_FAULT_COUNT_LO = 0x00E4
+};
+
 typedef enum {
   BOARD_A_COMMAND_NONE = 0,
   BOARD_A_COMMAND_APPLY_CONFIG = 1,
@@ -194,7 +244,8 @@ typedef enum {
   BOARD_A_COMMAND_STOP = 4,
   BOARD_A_COMMAND_SINGLE = 5,
   BOARD_A_COMMAND_SET_TIME = 6,
-  BOARD_A_COMMAND_ARM_START = 7
+  BOARD_A_COMMAND_ARM_START = 7,
+  BOARD_A_COMMAND_ACK_ALARM = 8
 } board_a_command_t;
 
 typedef enum {
@@ -253,6 +304,7 @@ typedef struct {
   bool valid;
   uint32_t version;
   board_a_config_t config;
+  board_a_alarm_config_t alarm_config;
 } board_a_active_config_t;
 
 /*
@@ -304,6 +356,7 @@ typedef struct {
 
 typedef struct {
   board_a_config_t pending_config;
+  board_a_alarm_config_t pending_alarm_config;
   board_a_active_config_t active_config;
   board_a_sensor_snapshot_t pending_sensor_snapshot;
   board_a_sensor_map_t sensor_map;
@@ -329,6 +382,14 @@ typedef struct {
   uint32_t single_ids[BOARD_A_SINGLE_DEDUP_CAPACITY];
   uint8_t single_id_count;
   uint8_t single_id_next;
+  /*
+   * ACK_ALARM has its own bounded session window. A command ID accepted by
+   * SINGLE must not suppress an otherwise distinct ACK request.
+   */
+  uint32_t alarm_ack_ids[BOARD_A_SINGLE_DEDUP_CAPACITY];
+  uint8_t alarm_ack_id_count;
+  uint8_t alarm_ack_id_next;
+  bool alarm_ack_requested;
   uint32_t records_this_run;
   uint64_t next_sample_us;
   bool start_pending;
@@ -363,6 +424,8 @@ void board_a_model_publish_alarm_result(
 
 bool board_a_model_copy_alarm_event(
     const board_a_model_t *model, board_a_alarm_result_t *result);
+
+bool board_a_model_take_alarm_ack_request(board_a_model_t *model);
 
 modbus_result_t board_a_model_read_registers(void *context,
                                              modbus_register_space_t space,

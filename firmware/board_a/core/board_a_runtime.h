@@ -70,6 +70,8 @@ void board_a_runtime_publish_alarm_result(
 bool board_a_runtime_copy_alarm_event(
     board_a_runtime_t *runtime, board_a_alarm_result_t *result);
 
+bool board_a_runtime_take_alarm_ack_request(board_a_runtime_t *runtime);
+
 bool board_a_runtime_request_sensor_map_save(
     board_a_runtime_t *runtime, uint32_t command_id);
 

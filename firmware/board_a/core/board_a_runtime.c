@@ -123,6 +123,19 @@ bool board_a_runtime_copy_alarm_event(
   return copied;
 }
 
+bool board_a_runtime_take_alarm_ack_request(board_a_runtime_t *runtime)
+{
+  bool requested;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  requested =
+      board_a_model_take_alarm_ack_request(&runtime->slave.model);
+  runtime_unlock(runtime);
+  return requested;
+}
+
 bool board_a_runtime_request_sensor_map_save(
     board_a_runtime_t *runtime, uint32_t command_id)
 {
@@ -139,6 +152,7 @@ bool board_a_runtime_request_sensor_map_save(
   config.period_sec = model->active_config.config.period_sec;
   config.channel_mask = model->active_config.config.channel_mask;
   config.record_count = model->active_config.config.record_count;
+  config.alarm = model->active_config.alarm_config;
   config.sensor_valid_mask = model->sensor_map.valid_mask;
   for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
     memcpy(config.sensor_roms[index], model->sensor_map.bindings[index].rom,

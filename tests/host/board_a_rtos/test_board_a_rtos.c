@@ -143,7 +143,9 @@ static bool runtime_finish_drain(board_a_runtime_t *runtime)
           true);
 }
 
-static bool runtime_submit_single(board_a_runtime_t *runtime, uint32_t id)
+static bool runtime_submit_command(board_a_runtime_t *runtime,
+                                   uint16_t command_code,
+                                   uint32_t id)
 {
   uint8_t request[64];
   uint8_t response[MODBUS_RTU_MAX_ADU_SIZE];
@@ -159,7 +161,12 @@ static bool runtime_submit_single(board_a_runtime_t *runtime, uint32_t id)
                        sizeof(response)) != 8U) {
     return false;
   }
-  return runtime_command(runtime, BOARD_A_COMMAND_SINGLE);
+  return runtime_command(runtime, command_code);
+}
+
+static bool runtime_submit_single(board_a_runtime_t *runtime, uint32_t id)
+{
+  return runtime_submit_command(runtime, BOARD_A_COMMAND_SINGLE, id);
 }
 
 static size_t make_read_request(uint8_t *frame,
@@ -1046,7 +1053,7 @@ static void test_t07_protocol_version_and_commands(void)
 
   /* Values outside the supported set are illegal values. */
   CHECK(runtime_command_expect_exception(&runtime, 0U, 0x03U));
-  CHECK(runtime_command_expect_exception(&runtime, 8U, 0x03U));
+  CHECK(runtime_command_expect_exception(&runtime, 9U, 0x03U));
   CHECK(runtime_command_expect_exception(&runtime, 0xFFFFU, 0x03U));
 
   /* The protocol 2 operations answer normally on a calibrated device. */
@@ -1157,6 +1164,59 @@ static void test_t08_word_encoding_and_boundaries(void)
   }
 }
 
+static void test_alarm_ack_request_take(void)
+{
+  fake_lock_t context;
+  board_a_runtime_t runtime;
+  board_a_alarm_state_t state;
+  board_a_alarm_state_t copied;
+  uint16_t command_result;
+  const uint32_t shared_id = 0x12345678U;
+
+  p3b_runtime_setup(&runtime, &context, 18U);
+  memset(&state, 0, sizeof(state));
+  state.valid = true;
+  state.level = BOARD_A_ALARM_WARNING;
+  state.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  state.trigger_phase = BOARD_A_ALARM_PHASE_A;
+  state.latched = true;
+  state.buzzer_enable = true;
+  state.event_id = 5U;
+  board_a_runtime_publish_alarm_state(&runtime, &state);
+
+  CHECK(runtime_submit_command(&runtime, BOARD_A_COMMAND_SINGLE, shared_id));
+  CHECK(runtime_submit_command(&runtime, BOARD_A_COMMAND_ACK_ALARM,
+                               shared_id));
+  CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_COMMAND_RESULT,
+                         &command_result) &&
+        (command_result == BOARD_A_COMMAND_RESULT_ACCEPTED));
+  CHECK(board_a_runtime_take_alarm_ack_request(&runtime));
+  CHECK(!board_a_runtime_take_alarm_ack_request(&runtime));
+
+  CHECK(board_a_runtime_copy_alarm_state(&runtime, &copied));
+  CHECK(copied.valid);
+  CHECK(copied.level == BOARD_A_ALARM_WARNING);
+  CHECK(copied.latched);
+  CHECK(!copied.acknowledged);
+  CHECK(copied.event_id == 5U);
+
+  CHECK(runtime_submit_command(&runtime, BOARD_A_COMMAND_ACK_ALARM,
+                               shared_id));
+  CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_COMMAND_RESULT,
+                         &command_result) &&
+        (command_result == BOARD_A_COMMAND_RESULT_DUPLICATE));
+  CHECK(!board_a_runtime_take_alarm_ack_request(&runtime));
+
+  CHECK(runtime_submit_command(&runtime, BOARD_A_COMMAND_ACK_ALARM, 9U));
+  CHECK(board_a_runtime_take_alarm_ack_request(&runtime));
+  CHECK(runtime_submit_command(&runtime, BOARD_A_COMMAND_SINGLE, 9U));
+  CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_COMMAND_RESULT,
+                         &command_result) &&
+        (command_result == BOARD_A_COMMAND_RESULT_ACCEPTED));
+
+  pthread_mutex_destroy(&context.mutex);
+}
+
 typedef struct {
   board_a_runtime_t *runtime;
   atomic_int *stop;
@@ -1237,6 +1297,7 @@ int main(void)
   test_t06_reset_defaults();
   test_t07_protocol_version_and_commands();
   test_t08_word_encoding_and_boundaries();
+  test_alarm_ack_request_take();
   test_concurrent_snapshot_and_commands();
 
   printf("board_a RTOS host tests: %u checks, %u failures\n",

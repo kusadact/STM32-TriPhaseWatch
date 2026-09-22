@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/buscomm-eeprom-tests.XXXXXX")"
 BOARD_A_CORE_DIR="$ROOT_DIR/firmware/board_a/core"
+BOARD_A_ALARM_DIR="$ROOT_DIR/firmware/board_a/alarm"
 CC="${CC:-cc}"
 
 cleanup() {
@@ -32,6 +33,7 @@ echo "HOST test_config_store"
   -I"$BOARD_A_CORE_DIR" \
   "$ROOT_DIR/firmware/app/config_store.c" \
   "$BOARD_A_CORE_DIR/board_a_record_format.c" \
+  "$BOARD_A_ALARM_DIR/board_a_alarm.c" \
   "$ROOT_DIR/firmware/board_a/sensors/ds18b20.c" \
   "$SCRIPT_DIR/test_config_store.c" \
   -o "$BUILD_DIR/test_config_store"

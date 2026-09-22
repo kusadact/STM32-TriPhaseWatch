@@ -16,6 +16,18 @@
     }                                                                        \
   } while (0)
 
+static void persisted_config_defaults(board_a_persisted_config_t *config)
+{
+  memset(config, 0, sizeof(*config));
+  board_a_alarm_default_config(&config->alarm);
+}
+
+static void put_le16(uint8_t *data, uint16_t value)
+{
+  data[0] = (uint8_t)value;
+  data[1] = (uint8_t)(value >> 8U);
+}
+
 static board_a_record_format_record_t make_record(uint32_t sequence,
                                                   uint8_t utc_valid,
                                                   uint32_t utc_seconds)
@@ -48,38 +60,64 @@ static int test_config_payload_codec(void)
 {
   static const uint8_t known_rom[8] = {
       0x28U, 0xFFU, 0x64U, 0x1EU, 0x5BU, 0x16U, 0x03U, 0x75U};
-  const board_a_persisted_config_t cases[] = {
-    {10U, 1U, 0U, 0U, {{0U}}},
-    {3600U, 15U, 65535U, 0U, {{0U}}},
-    {1234U, 0x000AU, 42U, 0x00U, {{0U}}},
+  const board_a_config_t cases[] = {
+    {10U, 1U, 0U},
+    {3600U, 15U, 65535U},
+    {1234U, 0x000AU, 42U},
   };
   uint8_t payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
+  board_a_persisted_config_t config;
   board_a_persisted_config_t decoded;
   size_t index;
 
   for (index = 0U; index < (sizeof(cases) / sizeof(cases[0])); index++) {
-    CHECK(board_a_config_payload_encode(&cases[index], payload,
+    persisted_config_defaults(&config);
+    config.period_sec = cases[index].period_sec;
+    config.channel_mask = cases[index].channel_mask;
+    config.record_count = cases[index].record_count;
+    CHECK(board_a_config_payload_encode(&config, payload,
                                         sizeof(payload)));
     CHECK(payload[0] == 'B');
     CHECK(payload[1] == '4');
     CHECK(payload[2] == BOARD_A_CONFIG_PAYLOAD_SCHEMA);
     CHECK(payload[3] == 0U);
-    CHECK(payload[10] == cases[index].sensor_valid_mask);
+    CHECK(payload[10] == config.sensor_valid_mask);
     CHECK(payload[11] == 0U);
     CHECK(board_a_config_payload_decode(payload, sizeof(payload), &decoded));
-    CHECK(decoded.period_sec == cases[index].period_sec);
-    CHECK(decoded.channel_mask == cases[index].channel_mask);
-    CHECK(decoded.record_count == cases[index].record_count);
-    CHECK(decoded.sensor_valid_mask == cases[index].sensor_valid_mask);
+    CHECK(decoded.period_sec == config.period_sec);
+    CHECK(decoded.channel_mask == config.channel_mask);
+    CHECK(decoded.record_count == config.record_count);
+    CHECK(decoded.sensor_valid_mask == config.sensor_valid_mask);
+    CHECK(memcmp(&decoded.alarm, &config.alarm, sizeof(config.alarm)) == 0);
   }
   {
-    board_a_persisted_config_t mapped = cases[0];
+    board_a_persisted_config_t mapped;
+
+    persisted_config_defaults(&mapped);
+    mapped.period_sec = 10U;
+    mapped.channel_mask = 0x0001U;
     mapped.sensor_valid_mask = 0x01U;
     memcpy(mapped.sensor_roms[0], known_rom, sizeof(known_rom));
+    mapped.alarm.phase_notice_x16 = 816;
+    mapped.alarm.phase_warning_x16 = 912;
+    mapped.alarm.phase_critical_x16 = 1232;
+    mapped.alarm.delta_notice_x16 = 96;
+    mapped.alarm.delta_warning_x16 = 176;
+    mapped.alarm.delta_critical_x16 = 256;
+    mapped.alarm.rise_notice_x16_per_min = 96;
+    mapped.alarm.rise_warning_x16_per_min = 176;
+    mapped.alarm.rise_critical_x16_per_min = 336;
+    mapped.alarm.assert_samples = 4U;
+    mapped.alarm.clear_samples = 6U;
+    mapped.alarm.hysteresis_x16 = 48;
+    mapped.alarm.rise_window_samples = 5U;
+    mapped.alarm.rise_window_min_ms = 3000000U;
+    mapped.alarm.buzzer_enable = 0U;
     CHECK(board_a_config_payload_encode(&mapped, payload, sizeof(payload)));
     CHECK(board_a_config_payload_decode(payload, sizeof(payload), &decoded));
     CHECK(decoded.sensor_valid_mask == 0x01U);
     CHECK(memcmp(decoded.sensor_roms[0], known_rom, sizeof(known_rom)) == 0);
+    CHECK(memcmp(&decoded.alarm, &mapped.alarm, sizeof(mapped.alarm)) == 0);
   }
   return 0;
 }
@@ -87,11 +125,16 @@ static int test_config_payload_codec(void)
 static int test_config_payload_rejections(void)
 {
   uint8_t payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
-  board_a_persisted_config_t config = {10U, 1U, 0U, 0U, {{0U}}};
+  board_a_persisted_config_t config;
   board_a_persisted_config_t decoded;
+  board_a_alarm_config_t default_alarm;
 
+  persisted_config_defaults(&config);
   CHECK(!board_a_config_payload_encode(&config, payload,
                                        sizeof(payload) - 1U));
+  config.alarm.phase_warning_x16 = config.alarm.phase_notice_x16;
+  CHECK(!board_a_config_payload_encode(&config, payload, sizeof(payload)));
+  board_a_alarm_default_config(&config.alarm);
   config.period_sec = 9U;
   CHECK(!board_a_config_payload_encode(&config, payload, sizeof(payload)));
   config.period_sec = 10U;
@@ -103,10 +146,14 @@ static int test_config_payload_rejections(void)
   CHECK(!board_a_config_payload_validate(payload, 0U));
   CHECK(!board_a_config_payload_validate(payload, 11U));
   CHECK(!board_a_config_payload_validate(payload, 13U));
+  CHECK(!board_a_config_payload_validate(
+      payload, BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE - 1U));
+  CHECK(!board_a_config_payload_validate(
+      payload, BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE + 1U));
   payload[0] = 'X';
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[0] = 'B';
-  payload[2] = 3U;
+  payload[2] = 4U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[2] = BOARD_A_CONFIG_PAYLOAD_SCHEMA;
   payload[3] = 1U;
@@ -118,6 +165,9 @@ static int test_config_payload_rejections(void)
   payload[11] = 1U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[11] = 0U;
+  payload[61] = 1U;
+  CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
+  payload[61] = 0U;
   payload[4] = 9U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   CHECK(!board_a_config_payload_decode(payload, sizeof(payload), &decoded));
@@ -131,6 +181,27 @@ static int test_config_payload_rejections(void)
     CHECK(board_a_config_payload_validate(legacy, sizeof(legacy)));
     CHECK(board_a_config_payload_decode(legacy, sizeof(legacy), &decoded));
     CHECK(decoded.sensor_valid_mask == 0U);
+    memset(&default_alarm, 0, sizeof(default_alarm));
+    board_a_alarm_default_config(&default_alarm);
+    CHECK(memcmp(&decoded.alarm, &default_alarm,
+                 sizeof(default_alarm)) == 0);
+  }
+  {
+    uint8_t legacy[BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE] = {0U};
+
+    legacy[0] = (uint8_t)'B';
+    legacy[1] = (uint8_t)'4';
+    legacy[2] = 2U;
+    put_le16(&legacy[4], 20U);
+    put_le16(&legacy[6], 0x0003U);
+    put_le16(&legacy[8], 7U);
+    CHECK(board_a_config_payload_validate(legacy, sizeof(legacy)));
+    CHECK(board_a_config_payload_decode(legacy, sizeof(legacy), &decoded));
+    CHECK(decoded.period_sec == 20U);
+    CHECK(decoded.channel_mask == 0x0003U);
+    CHECK(decoded.record_count == 7U);
+    CHECK(memcmp(&decoded.alarm, &default_alarm,
+                 sizeof(default_alarm)) == 0);
   }
   return 0;
 }

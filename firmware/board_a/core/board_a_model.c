@@ -221,26 +221,26 @@ static void set_command_status(board_a_model_t *model,
   model->last_command_id = command_id;
 }
 
-static bool single_id_is_known(const board_a_model_t *model, uint32_t id)
+static bool command_id_is_known(const uint32_t *ids, uint8_t count,
+                                uint32_t id)
 {
   uint8_t index;
 
-  for (index = 0U; index < model->single_id_count; ++index) {
-    if (model->single_ids[index] == id) {
+  for (index = 0U; index < count; ++index) {
+    if (ids[index] == id) {
       return true;
     }
   }
   return false;
 }
 
-static void remember_single_id(board_a_model_t *model, uint32_t id)
+static void remember_command_id(uint32_t *ids, uint8_t *count, uint8_t *next,
+                                uint32_t id)
 {
-  model->single_ids[model->single_id_next] = id;
-  model->single_id_next =
-      (uint8_t)((model->single_id_next + 1U) %
-                BOARD_A_SINGLE_DEDUP_CAPACITY);
-  if (model->single_id_count < BOARD_A_SINGLE_DEDUP_CAPACITY) {
-    model->single_id_count++;
+  ids[*next] = id;
+  *next = (uint8_t)((*next + 1U) % BOARD_A_SINGLE_DEDUP_CAPACITY);
+  if (*count < BOARD_A_SINGLE_DEDUP_CAPACITY) {
+    (*count)++;
   }
 }
 
@@ -254,13 +254,15 @@ static modbus_result_t execute_command(board_a_model_t *model,
 
   switch (command) {
     case BOARD_A_COMMAND_APPLY_CONFIG:
-      if (!config_is_valid(&model->pending_config)) {
+      if (!config_is_valid(&model->pending_config) ||
+          !board_a_alarm_validate_config(&model->pending_alarm_config)) {
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
                            command_id);
         model->stats.device_faults++;
         return MODBUS_RESULT_DEVICE_FAILURE;
       }
       model->active_config.config = model->pending_config;
+      model->active_config.alarm_config = model->pending_alarm_config;
       model->active_config.valid = true;
       model->active_config.version++;
       set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
@@ -277,6 +279,7 @@ static modbus_result_t execute_command(board_a_model_t *model,
         config.period_sec = model->active_config.config.period_sec;
         config.channel_mask = model->active_config.config.channel_mask;
         config.record_count = model->active_config.config.record_count;
+        config.alarm = model->active_config.alarm_config;
         config.sensor_valid_mask = model->sensor_map.valid_mask;
         for (sensor = 0U; sensor < BOARD_A_SENSOR_COUNT; ++sensor) {
           memcpy(config.sensor_roms[sensor],
@@ -351,13 +354,29 @@ static modbus_result_t execute_command(board_a_model_t *model,
                            command_id);
         return MODBUS_RESULT_SLAVE_BUSY;
       }
-      if (single_id_is_known(model, command_id)) {
+      if (command_id_is_known(model->single_ids, model->single_id_count,
+                              command_id)) {
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_DUPLICATE,
                            command_id);
         return MODBUS_RESULT_OK;
       }
       generate_record(model, BOARD_A_SAMPLE_TRIGGER_SINGLE, now_us, now_us);
-      remember_single_id(model, command_id);
+      remember_command_id(model->single_ids, &model->single_id_count,
+                          &model->single_id_next, command_id);
+      set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
+                         command_id);
+      return MODBUS_RESULT_OK;
+
+    case BOARD_A_COMMAND_ACK_ALARM:
+      if (command_id_is_known(model->alarm_ack_ids,
+                              model->alarm_ack_id_count, command_id)) {
+        set_command_status(model, command, BOARD_A_COMMAND_RESULT_DUPLICATE,
+                           command_id);
+        return MODBUS_RESULT_OK;
+      }
+      model->alarm_ack_requested = true;
+      remember_command_id(model->alarm_ack_ids, &model->alarm_ack_id_count,
+                          &model->alarm_ack_id_next, command_id);
       set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
                          command_id);
       return MODBUS_RESULT_OK;
@@ -458,6 +477,163 @@ static modbus_result_t read_holding_register(const board_a_model_t *model,
     case BOARD_A_HOLDING_COMMAND_ID_LO:
       *value = model->command_id_lo;
       return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_CONFIG_REVISION:
+      *value = BOARD_A_ALARM_CONFIG_CONTRACT_REVISION;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_PHASE_NOTICE:
+      *value = (uint16_t)model->pending_alarm_config.phase_notice_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_PHASE_WARNING:
+      *value = (uint16_t)model->pending_alarm_config.phase_warning_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_PHASE_CRITICAL:
+      *value = (uint16_t)model->pending_alarm_config.phase_critical_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_DELTA_NOTICE:
+      *value = (uint16_t)model->pending_alarm_config.delta_notice_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_DELTA_WARNING:
+      *value = (uint16_t)model->pending_alarm_config.delta_warning_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_DELTA_CRITICAL:
+      *value = (uint16_t)model->pending_alarm_config.delta_critical_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_RISE_NOTICE:
+      *value =
+          (uint16_t)model->pending_alarm_config.rise_notice_x16_per_min;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_RISE_WARNING:
+      *value =
+          (uint16_t)model->pending_alarm_config.rise_warning_x16_per_min;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_RISE_CRITICAL:
+      *value =
+          (uint16_t)model->pending_alarm_config.rise_critical_x16_per_min;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_ASSERT_SAMPLES:
+      *value = model->pending_alarm_config.assert_samples;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_CLEAR_SAMPLES:
+      *value = model->pending_alarm_config.clear_samples;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_HYSTERESIS:
+      *value = (uint16_t)model->pending_alarm_config.hysteresis_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_BUZZER_ENABLE:
+      *value = model->pending_alarm_config.buzzer_enable;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_HOLDING_ALARM_RESERVED_0:
+    case BOARD_A_HOLDING_ALARM_RESERVED_1:
+      *value = 0U;
+      return MODBUS_RESULT_OK;
+    default:
+      return MODBUS_RESULT_ILLEGAL_ADDRESS;
+  }
+}
+
+static uint16_t alarm_flags(const board_a_alarm_state_t *state)
+{
+  uint16_t flags = 0U;
+
+  if (state->valid) {
+    flags |= 0x0001U;
+  }
+  if (state->latched) {
+    flags |= 0x0002U;
+  }
+  if (state->acknowledged) {
+    flags |= 0x0004U;
+  }
+  if (state->latched && state->buzzer_enable && !state->acknowledged) {
+    flags |= 0x0008U;
+  }
+  return flags;
+}
+
+static modbus_result_t read_alarm_register(
+    const board_a_alarm_state_t *state, uint16_t address, uint16_t *value)
+{
+  switch (address) {
+    case BOARD_A_INPUT_ALARM_CONTRACT_REVISION:
+      *value = BOARD_A_ALARM_INPUT_CONTRACT_REVISION;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_LEVEL:
+      *value = (uint16_t)state->level;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_REASON:
+      *value = (uint16_t)state->reason;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_FLAGS:
+      *value = alarm_flags(state);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_TRIGGER_PHASE:
+      *value = (uint16_t)state->trigger_phase;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_DELTA_VALID:
+      *value = state->delta_valid ? 1U : 0U;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_MAXIMUM_DELTA_X16:
+      *value = (uint16_t)state->maximum_delta_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_HOTTEST_TEMPERATURE_X16:
+      *value = (uint16_t)state->hottest_temperature_x16;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_HOTTEST_PHASE:
+      *value = (uint16_t)state->hottest_phase;
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_TEMPERATURE_A_X16:
+    case BOARD_A_INPUT_ALARM_TEMPERATURE_B_X16:
+    case BOARD_A_INPUT_ALARM_TEMPERATURE_C_X16:
+      *value = (uint16_t)state->temperature_x16[
+          address - BOARD_A_INPUT_ALARM_TEMPERATURE_A_X16];
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_QUALITY_A:
+    case BOARD_A_INPUT_ALARM_QUALITY_B:
+    case BOARD_A_INPUT_ALARM_QUALITY_C:
+      *value = state->quality[address - BOARD_A_INPUT_ALARM_QUALITY_A];
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_EVENT_ID_HI:
+      *value = word_high16(state->event_id);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_EVENT_ID_LO:
+      *value = word_low16(state->event_id);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_SAMPLE_ID_HI:
+      *value = word_high16(state->sample_id);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_SAMPLE_ID_LO:
+      *value = word_low16(state->sample_id);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_DURATION_SEC_HI:
+      *value = word_high16(state->duration_sec);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_DURATION_SEC_LO:
+      *value = word_low16(state->duration_sec);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_NOTICE_COUNT_HI:
+      *value = word_high16(state->notice_count);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_NOTICE_COUNT_LO:
+      *value = word_low16(state->notice_count);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_WARNING_COUNT_HI:
+      *value = word_high16(state->warning_count);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_WARNING_COUNT_LO:
+      *value = word_low16(state->warning_count);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_CRITICAL_COUNT_HI:
+      *value = word_high16(state->critical_count);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_CRITICAL_COUNT_LO:
+      *value = word_low16(state->critical_count);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_SENSOR_FAULT_COUNT_HI:
+      *value = word_high16(state->sensor_fault_count);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_ALARM_SENSOR_FAULT_COUNT_LO:
+      *value = word_low16(state->sensor_fault_count);
+      return MODBUS_RESULT_OK;
     default:
       return MODBUS_RESULT_ILLEGAL_ADDRESS;
   }
@@ -540,11 +716,15 @@ static modbus_result_t read_ds18b20_register(const board_a_model_t *model,
   return MODBUS_RESULT_ILLEGAL_ADDRESS;
 }
 
-static modbus_result_t read_input_register(const board_a_model_t *model,
-                                           uint16_t address,
-                                           uint16_t *value,
-                                           uint64_t now_us)
+static modbus_result_t read_input_register(
+    const board_a_model_t *model, const board_a_alarm_state_t *alarm,
+    uint16_t address, uint16_t *value, uint64_t now_us)
 {
+  if ((address >= BOARD_A_INPUT_ALARM_CONTRACT_REVISION) &&
+      (address <= BOARD_A_INPUT_ALARM_SENSOR_FAULT_COUNT_LO)) {
+    return read_alarm_register(alarm, address, value);
+  }
+
   switch (address) {
     case BOARD_A_INPUT_DEVICE_TYPE:
       *value = 0x0001U;
@@ -937,9 +1117,11 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->pending_config.period_sec = BOARD_A_DEFAULT_PERIOD_SEC;
   model->pending_config.channel_mask = BOARD_A_DEFAULT_CHANNEL_MASK;
   model->pending_config.record_count = BOARD_A_DEFAULT_RECORD_COUNT;
+  board_a_alarm_default_config(&model->pending_alarm_config);
   model->active_config.valid = true;
   model->active_config.version = 0U;
   model->active_config.config = model->pending_config;
+  model->active_config.alarm_config = model->pending_alarm_config;
   model->snapshot.valid = false;
   model->snapshot.sequence = 0U;
   model->snapshot.sample_time_us = 0U;
@@ -975,6 +1157,9 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->last_command_id = 0U;
   model->single_id_count = 0U;
   model->single_id_next = 0U;
+  model->alarm_ack_id_count = 0U;
+  model->alarm_ack_id_next = 0U;
+  model->alarm_ack_requested = false;
   model->records_this_run = 0U;
   model->next_sample_us = 0U;
   model->start_pending = false;
@@ -1097,6 +1282,18 @@ bool board_a_model_copy_alarm_event(
   return true;
 }
 
+bool board_a_model_take_alarm_ack_request(board_a_model_t *model)
+{
+  bool requested;
+
+  if (model == NULL) {
+    return false;
+  }
+  requested = model->alarm_ack_requested;
+  model->alarm_ack_requested = false;
+  return requested;
+}
+
 modbus_result_t board_a_model_read_registers(void *context,
                                              modbus_register_space_t space,
                                              uint16_t address,
@@ -1105,6 +1302,7 @@ modbus_result_t board_a_model_read_registers(void *context,
                                              uint64_t now_us)
 {
   board_a_model_t *model = (board_a_model_t *)context;
+  board_a_alarm_state_t alarm_snapshot;
   uint16_t index;
   modbus_result_t result;
 
@@ -1112,13 +1310,14 @@ modbus_result_t board_a_model_read_registers(void *context,
     return MODBUS_RESULT_ILLEGAL_VALUE;
   }
 
+  alarm_snapshot = model->alarm_state;
   for (index = 0U; index < quantity; ++index) {
     if (space == MODBUS_REGISTER_HOLDING) {
       result = read_holding_register(model,
                                      (uint16_t)(address + index),
                                      &values[index]);
     } else if (space == MODBUS_REGISTER_INPUT) {
-      result = read_input_register(model,
+      result = read_input_register(model, &alarm_snapshot,
                                    (uint16_t)(address + index),
                                    &values[index], now_us);
     } else {
@@ -1141,6 +1340,7 @@ modbus_result_t board_a_model_write_registers(void *context,
 {
   board_a_model_t *model = (board_a_model_t *)context;
   board_a_config_t candidate_config;
+  board_a_alarm_config_t candidate_alarm_config;
   uint16_t command_register;
   uint16_t command_id_hi;
   uint16_t command_id_lo;
@@ -1177,6 +1377,80 @@ modbus_result_t board_a_model_write_registers(void *context,
       return MODBUS_RESULT_ILLEGAL_VALUE;
     }
     model->pending_config = candidate_config;
+    return MODBUS_RESULT_OK;
+  }
+
+  if ((address >= BOARD_A_HOLDING_ALARM_CONFIG_REVISION) &&
+      (address <= BOARD_A_HOLDING_ALARM_RESERVED_1)) {
+    if ((address < BOARD_A_HOLDING_ALARM_PHASE_NOTICE) ||
+        (address > BOARD_A_HOLDING_ALARM_BUZZER_ENABLE) ||
+        ((uint32_t)address + quantity >
+         (uint32_t)BOARD_A_HOLDING_ALARM_BUZZER_ENABLE + 1U)) {
+      return MODBUS_RESULT_ILLEGAL_ADDRESS;
+    }
+
+    candidate_alarm_config = model->pending_alarm_config;
+    for (index = 0U; index < quantity; ++index) {
+      switch (address + index) {
+        case BOARD_A_HOLDING_ALARM_PHASE_NOTICE:
+          candidate_alarm_config.phase_notice_x16 =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_PHASE_WARNING:
+          candidate_alarm_config.phase_warning_x16 =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_PHASE_CRITICAL:
+          candidate_alarm_config.phase_critical_x16 =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_DELTA_NOTICE:
+          candidate_alarm_config.delta_notice_x16 =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_DELTA_WARNING:
+          candidate_alarm_config.delta_warning_x16 =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_DELTA_CRITICAL:
+          candidate_alarm_config.delta_critical_x16 =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_RISE_NOTICE:
+          candidate_alarm_config.rise_notice_x16_per_min =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_RISE_WARNING:
+          candidate_alarm_config.rise_warning_x16_per_min =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_RISE_CRITICAL:
+          candidate_alarm_config.rise_critical_x16_per_min =
+              (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_ASSERT_SAMPLES:
+          candidate_alarm_config.assert_samples = values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_CLEAR_SAMPLES:
+          candidate_alarm_config.clear_samples = values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_HYSTERESIS:
+          candidate_alarm_config.hysteresis_x16 = (int16_t)values[index];
+          break;
+        case BOARD_A_HOLDING_ALARM_BUZZER_ENABLE:
+          if (values[index] > 1U) {
+            return MODBUS_RESULT_ILLEGAL_VALUE;
+          }
+          candidate_alarm_config.buzzer_enable = (uint8_t)values[index];
+          break;
+        default:
+          return MODBUS_RESULT_ILLEGAL_ADDRESS;
+      }
+    }
+    if (!board_a_alarm_validate_config(&candidate_alarm_config)) {
+      return MODBUS_RESULT_ILLEGAL_VALUE;
+    }
+    model->pending_alarm_config = candidate_alarm_config;
     return MODBUS_RESULT_OK;
   }
 
@@ -1253,7 +1527,7 @@ modbus_result_t board_a_model_write_registers(void *context,
 
   if (writes_command &&
       ((command_register < BOARD_A_COMMAND_APPLY_CONFIG) ||
-       (command_register > BOARD_A_COMMAND_ARM_START))) {
+       (command_register > BOARD_A_COMMAND_ACK_ALARM))) {
     return MODBUS_RESULT_ILLEGAL_VALUE;
   }
 
@@ -1348,7 +1622,8 @@ void board_a_model_apply_loaded_config(
   if ((config->period_sec < BOARD_A_PERIOD_MIN_SEC) ||
       (config->period_sec > BOARD_A_PERIOD_MAX_SEC) ||
       (config->channel_mask < BOARD_A_CHANNEL_MASK_MIN) ||
-      (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX)) {
+      (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX) ||
+      !board_a_alarm_validate_config(&config->alarm)) {
     board_a_model_note_config_load(
         model, BOARD_A_CONFIG_LOAD_DEFAULT_ERROR, 0U);
     return;
@@ -1356,7 +1631,9 @@ void board_a_model_apply_loaded_config(
   model->pending_config.period_sec = config->period_sec;
   model->pending_config.channel_mask = config->channel_mask;
   model->pending_config.record_count = config->record_count;
+  model->pending_alarm_config = config->alarm;
   model->active_config.config = model->pending_config;
+  model->active_config.alarm_config = model->pending_alarm_config;
   model->active_config.valid = true;
   memset(&model->sensor_map, 0, sizeof(model->sensor_map));
   model->sensor_map.valid_mask = config->sensor_valid_mask;

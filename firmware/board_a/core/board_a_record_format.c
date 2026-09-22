@@ -97,6 +97,22 @@ static void write_le16(uint8_t *data, uint16_t value)
   data[1] = (uint8_t)(value >> 8U);
 }
 
+static uint32_t read_le32(const uint8_t *data)
+{
+  return (uint32_t)data[0] |
+      ((uint32_t)data[1] << 8U) |
+      ((uint32_t)data[2] << 16U) |
+      ((uint32_t)data[3] << 24U);
+}
+
+static void write_le32(uint8_t *data, uint32_t value)
+{
+  data[0] = (uint8_t)value;
+  data[1] = (uint8_t)(value >> 8U);
+  data[2] = (uint8_t)(value >> 16U);
+  data[3] = (uint8_t)(value >> 24U);
+}
+
 static int ds18b20_error_matches_quality(uint16_t quality, uint16_t error)
 {
   if (quality == BOARD_A_QUALITY_OK) {
@@ -185,6 +201,7 @@ int board_a_config_payload_decode(const uint8_t *payload, size_t length,
 {
   if ((payload == NULL) || (config == NULL) ||
       ((length != BOARD_A_CONFIG_PAYLOAD_SCHEMA1_SIZE) &&
+       (length != BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE) &&
        (length != BOARD_A_CONFIG_PAYLOAD_SIZE)) ||
       (payload[0] != (uint8_t)'B') || (payload[1] != (uint8_t)'4') ||
       (payload[3] != 0U)) {
@@ -204,17 +221,62 @@ int board_a_config_payload_decode(const uint8_t *payload, size_t length,
 
   if ((length == BOARD_A_CONFIG_PAYLOAD_SCHEMA1_SIZE) &&
       (payload[2] == 1U) && (payload[10] == 0U) && (payload[11] == 0U)) {
+    board_a_alarm_default_config(&config->alarm);
     return 1;
   }
-  if ((length != BOARD_A_CONFIG_PAYLOAD_SIZE) ||
-      (payload[2] != BOARD_A_CONFIG_PAYLOAD_SCHEMA) ||
-      (payload[11] != 0U)) {
+
+  if ((length != BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE) &&
+      (length != BOARD_A_CONFIG_PAYLOAD_SIZE)) {
     return 0;
   }
-
+  if ((payload[2] != 2U) && (payload[2] != BOARD_A_CONFIG_PAYLOAD_SCHEMA)) {
+    return 0;
+  }
+  if ((length == BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE) &&
+      (payload[2] != 2U)) {
+    return 0;
+  }
+  if ((length == BOARD_A_CONFIG_PAYLOAD_SIZE) &&
+      (payload[2] != BOARD_A_CONFIG_PAYLOAD_SCHEMA)) {
+    return 0;
+  }
+  if (payload[11] != 0U) {
+    return 0;
+  }
+  if ((length == BOARD_A_CONFIG_PAYLOAD_SIZE) &&
+      (payload[61] != 0U)) {
+    return 0;
+  }
   config->sensor_valid_mask = payload[10];
   memcpy(config->sensor_roms, &payload[12], sizeof(config->sensor_roms));
   if (!ds18b20_map_is_valid(config)) {
+    return 0;
+  }
+
+  if (length == BOARD_A_CONFIG_PAYLOAD_SCHEMA2_SIZE) {
+    board_a_alarm_default_config(&config->alarm);
+    return 1;
+  }
+
+  config->alarm.phase_notice_x16 = (int16_t)read_le16(&payload[36]);
+  config->alarm.phase_warning_x16 = (int16_t)read_le16(&payload[38]);
+  config->alarm.phase_critical_x16 = (int16_t)read_le16(&payload[40]);
+  config->alarm.delta_notice_x16 = (int16_t)read_le16(&payload[42]);
+  config->alarm.delta_warning_x16 = (int16_t)read_le16(&payload[44]);
+  config->alarm.delta_critical_x16 = (int16_t)read_le16(&payload[46]);
+  config->alarm.rise_notice_x16_per_min =
+      (int16_t)read_le16(&payload[48]);
+  config->alarm.rise_warning_x16_per_min =
+      (int16_t)read_le16(&payload[50]);
+  config->alarm.rise_critical_x16_per_min =
+      (int16_t)read_le16(&payload[52]);
+  config->alarm.assert_samples = read_le16(&payload[54]);
+  config->alarm.clear_samples = read_le16(&payload[56]);
+  config->alarm.hysteresis_x16 = (int16_t)read_le16(&payload[58]);
+  config->alarm.buzzer_enable = payload[60];
+  config->alarm.rise_window_samples = read_le16(&payload[62]);
+  config->alarm.rise_window_min_ms = read_le32(&payload[64]);
+  if (!board_a_alarm_validate_config(&config->alarm)) {
     return 0;
   }
   return 1;
@@ -229,7 +291,8 @@ int board_a_config_payload_encode(const board_a_persisted_config_t *config,
       (config->period_sec > BOARD_A_PERIOD_MAX_SEC) ||
       (config->channel_mask < BOARD_A_CHANNEL_MASK_MIN) ||
       (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX) ||
-      !ds18b20_map_is_valid(config)) {
+      !ds18b20_map_is_valid(config) ||
+      !board_a_alarm_validate_config(&config->alarm)) {
     return 0;
   }
 
@@ -242,6 +305,24 @@ int board_a_config_payload_encode(const board_a_persisted_config_t *config,
   write_le16(&payload[8], config->record_count);
   payload[10] = config->sensor_valid_mask;
   memcpy(&payload[12], config->sensor_roms, sizeof(config->sensor_roms));
+  write_le16(&payload[36], (uint16_t)config->alarm.phase_notice_x16);
+  write_le16(&payload[38], (uint16_t)config->alarm.phase_warning_x16);
+  write_le16(&payload[40], (uint16_t)config->alarm.phase_critical_x16);
+  write_le16(&payload[42], (uint16_t)config->alarm.delta_notice_x16);
+  write_le16(&payload[44], (uint16_t)config->alarm.delta_warning_x16);
+  write_le16(&payload[46], (uint16_t)config->alarm.delta_critical_x16);
+  write_le16(&payload[48],
+             (uint16_t)config->alarm.rise_notice_x16_per_min);
+  write_le16(&payload[50],
+             (uint16_t)config->alarm.rise_warning_x16_per_min);
+  write_le16(&payload[52],
+             (uint16_t)config->alarm.rise_critical_x16_per_min);
+  write_le16(&payload[54], config->alarm.assert_samples);
+  write_le16(&payload[56], config->alarm.clear_samples);
+  write_le16(&payload[58], (uint16_t)config->alarm.hysteresis_x16);
+  payload[60] = config->alarm.buzzer_enable;
+  write_le16(&payload[62], config->alarm.rise_window_samples);
+  write_le32(&payload[64], config->alarm.rise_window_min_ms);
   return 1;
 }
 

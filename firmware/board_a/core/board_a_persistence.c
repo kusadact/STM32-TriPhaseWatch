@@ -30,7 +30,8 @@ board_a_save_accept_result_t board_a_persistence_accept_save(
   if ((config->period_sec < BOARD_A_PERIOD_MIN_SEC) ||
       (config->period_sec > BOARD_A_PERIOD_MAX_SEC) ||
       (config->channel_mask < BOARD_A_CHANNEL_MASK_MIN) ||
-      (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX)) {
+      (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX) ||
+      !board_a_alarm_validate_config(&config->alarm)) {
     return BOARD_A_SAVE_ACCEPT_INVALID;
   }
   if (persistence->save.state == BOARD_A_SAVE_PENDING) {

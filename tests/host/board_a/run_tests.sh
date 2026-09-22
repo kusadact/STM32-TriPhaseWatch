@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 CORE_DIR="$ROOT_DIR/firmware/board_a/core"
 SENSOR_DIR="$ROOT_DIR/firmware/board_a/sensors"
+ALARM_DIR="$ROOT_DIR/firmware/board_a/alarm"
 BUILD_DIR="$ROOT_DIR/build/host/board_a"
 BINARY="$BUILD_DIR/test_board_a"
 CC="${CC:-clang}"
@@ -21,6 +22,7 @@ mkdir -p "$BUILD_DIR"
   "$CORE_DIR/board_a_persistence.c" \
   "$CORE_DIR/board_a_record_format.c" \
   "$SENSOR_DIR/ds18b20.c" \
+  "$ALARM_DIR/board_a_alarm.c" \
   "$CORE_DIR/board_a_model.c" \
   "$CORE_DIR/board_a_slave.c" \
   -o "$BINARY"
