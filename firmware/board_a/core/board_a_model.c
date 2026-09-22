@@ -953,6 +953,17 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   reset_sensor_snapshot(&model->snapshot.sensors);
   reset_sensor_snapshot(&model->pending_sensor_snapshot);
   memset(&model->sensor_map, 0, sizeof(model->sensor_map));
+  memset(&model->alarm_state, 0, sizeof(model->alarm_state));
+  model->alarm_state.level = BOARD_A_ALARM_UNKNOWN;
+  model->alarm_state.reason = BOARD_A_ALARM_REASON_NONE;
+  model->alarm_state.trigger_phase = BOARD_A_ALARM_PHASE_NONE;
+  model->alarm_state.hottest_phase = BOARD_A_ALARM_PHASE_NONE;
+  model->alarm_state.coldest_phase = BOARD_A_ALARM_PHASE_NONE;
+  model->alarm_state.maximum_rise_phase = BOARD_A_ALARM_PHASE_NONE;
+  model->alarm_event = false;
+  model->alarm_event_type = BOARD_A_ALARM_EVENT_NONE;
+  model->alarm_event_id = 0U;
+  model->alarm_event_time_ms = 0U;
   model->data_source = BOARD_A_DATA_SOURCE_TEST;
   model->run_state = BOARD_A_RUN_STOPPED;
   model->session_id = session_id;
@@ -1036,6 +1047,53 @@ bool board_a_model_copy_sensor_map(
     return false;
   }
   *map = model->sensor_map;
+  return true;
+}
+
+void board_a_model_publish_alarm_state(
+    board_a_model_t *model, const board_a_alarm_state_t *state)
+{
+  if ((model == NULL) || (state == NULL)) {
+    return;
+  }
+  model->alarm_state = *state;
+}
+
+bool board_a_model_copy_alarm_state(
+    const board_a_model_t *model, board_a_alarm_state_t *state)
+{
+  if ((model == NULL) || (state == NULL)) {
+    return false;
+  }
+  *state = model->alarm_state;
+  return true;
+}
+
+void board_a_model_publish_alarm_result(
+    board_a_model_t *model, const board_a_alarm_result_t *result)
+{
+  if ((model == NULL) || (result == NULL)) {
+    return;
+  }
+  model->alarm_state = result->state;
+  model->alarm_event = result->event;
+  model->alarm_event_type = result->event_type;
+  model->alarm_event_id = result->event_id;
+  model->alarm_event_time_ms = result->event_time_ms;
+}
+
+bool board_a_model_copy_alarm_event(
+    const board_a_model_t *model, board_a_alarm_result_t *result)
+{
+  if ((model == NULL) || (result == NULL)) {
+    return false;
+  }
+  memset(result, 0, sizeof(*result));
+  result->event = model->alarm_event;
+  result->event_type = model->alarm_event_type;
+  result->event_id = model->alarm_event_id;
+  result->event_time_ms = model->alarm_event_time_ms;
+  result->state = model->alarm_state;
   return true;
 }
 

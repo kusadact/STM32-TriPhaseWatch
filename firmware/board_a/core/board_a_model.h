@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../alarm/board_a_alarm.h"
 #include "../sensors/sensor_manager.h"
 #include "board_a_persistence.h"
 #include "modbus_rtu.h"
@@ -306,6 +307,11 @@ typedef struct {
   board_a_active_config_t active_config;
   board_a_sensor_snapshot_t pending_sensor_snapshot;
   board_a_sensor_map_t sensor_map;
+  board_a_alarm_state_t alarm_state;
+  bool alarm_event;
+  board_a_alarm_event_type_t alarm_event_type;
+  uint32_t alarm_event_id;
+  uint64_t alarm_event_time_ms;
   board_a_snapshot_t snapshot;
   uint16_t data_source;
   board_a_run_state_t run_state;
@@ -345,6 +351,18 @@ bool board_a_model_publish_sensor_map(
 
 bool board_a_model_copy_sensor_map(
     const board_a_model_t *model, board_a_sensor_map_t *map);
+
+void board_a_model_publish_alarm_state(
+    board_a_model_t *model, const board_a_alarm_state_t *state);
+
+bool board_a_model_copy_alarm_state(
+    const board_a_model_t *model, board_a_alarm_state_t *state);
+
+void board_a_model_publish_alarm_result(
+    board_a_model_t *model, const board_a_alarm_result_t *result);
+
+bool board_a_model_copy_alarm_event(
+    const board_a_model_t *model, board_a_alarm_result_t *result);
 
 modbus_result_t board_a_model_read_registers(void *context,
                                              modbus_register_space_t space,

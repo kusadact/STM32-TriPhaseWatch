@@ -77,6 +77,52 @@ bool board_a_runtime_copy_sensor_map(
   return copied;
 }
 
+void board_a_runtime_publish_alarm_state(
+    board_a_runtime_t *runtime, const board_a_alarm_state_t *state)
+{
+  if ((state == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_publish_alarm_state(&runtime->slave.model, state);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_copy_alarm_state(
+    board_a_runtime_t *runtime, board_a_alarm_state_t *state)
+{
+  bool copied;
+
+  if ((state == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_alarm_state(&runtime->slave.model, state);
+  runtime_unlock(runtime);
+  return copied;
+}
+
+void board_a_runtime_publish_alarm_result(
+    board_a_runtime_t *runtime, const board_a_alarm_result_t *result)
+{
+  if ((result == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_publish_alarm_result(&runtime->slave.model, result);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_copy_alarm_event(
+    board_a_runtime_t *runtime, board_a_alarm_result_t *result)
+{
+  bool copied;
+
+  if ((result == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_alarm_event(&runtime->slave.model, result);
+  runtime_unlock(runtime);
+  return copied;
+}
+
 bool board_a_runtime_request_sensor_map_save(
     board_a_runtime_t *runtime, uint32_t command_id)
 {

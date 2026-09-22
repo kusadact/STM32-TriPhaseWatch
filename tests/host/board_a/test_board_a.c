@@ -877,6 +877,39 @@ static void test_frame_separation(void)
                            sizeof(response)) == second_length - 1U);
 }
 
+static void test_alarm_result_snapshot(void)
+{
+  board_a_model_t model;
+  board_a_alarm_result_t published;
+  board_a_alarm_result_t copied;
+  board_a_alarm_state_t state;
+
+  board_a_model_init(&model, 7U);
+  memset(&published, 0, sizeof(published));
+  published.event = true;
+  published.event_type = BOARD_A_ALARM_EVENT_RAISED;
+  published.event_id = 9U;
+  published.event_time_ms = 123456U;
+  published.state.valid = true;
+  published.state.level = BOARD_A_ALARM_WARNING;
+  published.state.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  published.state.trigger_phase = BOARD_A_ALARM_PHASE_C;
+  published.state.delta_valid = true;
+  published.state.maximum_delta_x16 = 240;
+
+  board_a_model_publish_alarm_result(&model, &published);
+  CHECK(board_a_model_copy_alarm_event(&model, &copied));
+  CHECK(copied.event);
+  CHECK(copied.event_type == BOARD_A_ALARM_EVENT_RAISED);
+  CHECK(copied.event_id == 9U);
+  CHECK(copied.event_time_ms == 123456U);
+  CHECK(copied.state.level == BOARD_A_ALARM_WARNING);
+  CHECK(copied.state.trigger_phase == BOARD_A_ALARM_PHASE_C);
+  CHECK(board_a_model_copy_alarm_state(&model, &state));
+  CHECK(state.level == BOARD_A_ALARM_WARNING);
+  CHECK(state.maximum_delta_x16 == 240);
+}
+
 int main(void)
 {
   test_crc_standard_vector();
@@ -894,6 +927,7 @@ int main(void)
   test_log_schedule_period_and_32bit_wrap();
   test_commands_and_scheduler();
   test_frame_separation();
+  test_alarm_result_snapshot();
 
   printf("board_a host tests: %u checks, %u failures\n",
          g_checks, g_failures);

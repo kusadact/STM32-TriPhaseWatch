@@ -58,6 +58,18 @@ bool board_a_runtime_publish_sensor_map(
 bool board_a_runtime_copy_sensor_map(
     board_a_runtime_t *runtime, board_a_sensor_map_t *map);
 
+void board_a_runtime_publish_alarm_state(
+    board_a_runtime_t *runtime, const board_a_alarm_state_t *state);
+
+bool board_a_runtime_copy_alarm_state(
+    board_a_runtime_t *runtime, board_a_alarm_state_t *state);
+
+void board_a_runtime_publish_alarm_result(
+    board_a_runtime_t *runtime, const board_a_alarm_result_t *result);
+
+bool board_a_runtime_copy_alarm_event(
+    board_a_runtime_t *runtime, board_a_alarm_result_t *result);
+
 bool board_a_runtime_request_sensor_map_save(
     board_a_runtime_t *runtime, uint32_t command_id);
 

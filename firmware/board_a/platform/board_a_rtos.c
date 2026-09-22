@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "FreeRTOS.h"
+#include "../alarm/board_a_alarm.h"
 #include "../sensors/sensor_manager.h"
 #include "board_a_log_schedule.h"
 #include "board_a_monotonic.h"
@@ -90,6 +91,7 @@ static board_a_tx_t g_tx;
 static board_a_rx_recovery_t g_rx_recovery;
 static board_a_log_schedule_t g_log_schedule;
 static board_a_sensor_manager_t g_sensor_manager;
+static board_a_alarm_t g_alarm;
 
 static QueueHandle_t g_rx_queue;
 static SemaphoreHandle_t g_model_mutex;
@@ -863,6 +865,7 @@ static uint32_t acquisition_wait_ms(const board_a_runtime_status_t *status,
 
 static void sensor_scan_if_due(uint64_t now_us)
 {
+  board_a_alarm_result_t alarm_result;
   board_a_runtime_status_t status;
   board_a_sensor_snapshot_t snapshot;
   board_a_sensor_map_t runtime_map;
@@ -880,6 +883,9 @@ static void sensor_scan_if_due(uint64_t now_us)
   }
   if (board_a_sensor_manager_step(&g_sensor_manager, now_us, &snapshot)) {
     board_a_runtime_publish_sensor_snapshot(&g_runtime, &snapshot);
+    if (board_a_alarm_update(&g_alarm, &snapshot, &alarm_result)) {
+      board_a_runtime_publish_alarm_result(&g_runtime, &alarm_result);
+    }
   }
   if (board_a_sensor_manager_take_map_dirty(&g_sensor_manager) &&
       board_a_sensor_manager_copy_map(&g_sensor_manager, &manager_map)) {
@@ -1012,6 +1018,7 @@ int board_a_rtos_run(void)
   delay_init(168U);
   sensor_gpio_init();
   board_a_sensor_manager_init(&g_sensor_manager, &g_sensor_port);
+  board_a_alarm_init(&g_alarm);
   create_runtime_objects();
   rs485_init();
   board_a_persistence_startup(&g_runtime);

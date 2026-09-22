@@ -31,6 +31,7 @@ CPUFLAGS=(-mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard)
 INCLUDES=(
   "-I$CORE_DIR"
   "-I$PLATFORM_DIR"
+  "-I$BOARD_DIR/alarm"
   "-I$APP_DIR"
   "-I$APP_DIR/sdcard"
   "-I$FREERTOS_DIR/include"
@@ -77,6 +78,7 @@ sources=(
   "$CORE_DIR/board_a_record_format.c"
   "$CORE_DIR/board_a_storage_engine.c"
   "$CORE_DIR/board_a_slave.c"
+  "$BOARD_DIR/alarm/board_a_alarm.c"
   "$BOARD_DIR/sensors/ds18b20.c"
   "$BOARD_DIR/sensors/sensor_manager.c"
   "$PLATFORM_DIR/board_a_main.c"
