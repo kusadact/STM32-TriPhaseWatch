@@ -145,7 +145,9 @@ bool board_a_sensor_manager_set_map(
   }
   manager->map = *map;
   manager->map_dirty = false;
-  manager->discovery_complete = true;
+  manager->discovery_complete =
+      (map->valid_mask == BOARD_A_SENSOR_ALL_BOUND_MASK);
+  manager->next_discovery_us = 0U;
   return true;
 }
 
@@ -187,56 +189,88 @@ uint64_t board_a_sensor_manager_next_step_us(
   return (manager == NULL) ? 0U : manager->next_step_us;
 }
 
+static int free_slot_for(const board_a_sensor_map_t *map)
+{
+  uint8_t index;
+
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    if ((map->valid_mask & (uint8_t)(1U << index)) == 0U) {
+      return (int)index;
+    }
+  }
+  return -1;
+}
+
+static bool rom_is_bound(const board_a_sensor_map_t *map,
+                         const ds18b20_rom_t *rom)
+{
+  uint8_t index;
+
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    if (((map->valid_mask & (uint8_t)(1U << index)) != 0U) &&
+        (memcmp(map->bindings[index].rom, rom->bytes,
+                DS18B20_ROM_SIZE) == 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * Merge scan: existing bindings are never renamed, never moved and never
+ * dropped; a ROM that is not bound yet only ever fills the lowest free slot.
+ * That keeps logical names stable while still letting a probe added later
+ * take an empty slot instead of staying not-present forever.
+ */
 static bool discover_devices(
     board_a_sensor_manager_t *manager, uint64_t now_us)
 {
   ds18b20_rom_t rom;
-  uint8_t found = 0U;
   ds18b20_status_t status;
+  bool added = false;
+  bool search_failed = false;
 
-  if (manager->map.valid_mask != 0U) {
-    manager->discovery_complete = true;
-    return true;
-  }
-
-  memset(&manager->map, 0, sizeof(manager->map));
   ds18b20_search_start(&manager->bus);
   for (;;) {
+    int slot;
+
     status = ds18b20_search_next(&manager->bus, &rom);
     if (status == DS18B20_STATUS_NO_MORE_DEVICES) {
       break;
     }
     if (status != DS18B20_STATUS_OK) {
-      manager->next_step_us = now_us + BOARD_A_SENSOR_RETRY_PERIOD_US;
-      manager->discovery_complete = (found != 0U);
-      return found != 0U;
+      search_failed = true;
+      break;
     }
-    if (found < BOARD_A_SENSOR_COUNT) {
-      uint8_t index;
-      bool duplicate = false;
-
-      for (index = 0U; index < found; ++index) {
-        if (memcmp(manager->map.bindings[index].rom, rom.bytes,
-                   DS18B20_ROM_SIZE) == 0) {
-          duplicate = true;
-          break;
-        }
-      }
-      if (!duplicate) {
-        memcpy(manager->map.bindings[found].rom, rom.bytes,
-               DS18B20_ROM_SIZE);
-        manager->map.bindings[found].rom_short = rom_short_id(rom.bytes);
-        manager->map.bindings[found].bound = true;
-        manager->map.valid_mask |= (uint8_t)(1U << found);
-        found++;
-      }
+    if (rom_is_bound(&manager->map, &rom)) {
+      continue;
     }
+    slot = free_slot_for(&manager->map);
+    if (slot < 0) {
+      break;
+    }
+    memcpy(manager->map.bindings[slot].rom, rom.bytes, DS18B20_ROM_SIZE);
+    manager->map.bindings[slot].rom_short = rom_short_id(rom.bytes);
+    manager->map.bindings[slot].bound = true;
+    manager->map.valid_mask |= (uint8_t)(1U << (uint8_t)slot);
+    added = true;
   }
 
-  manager->discovery_complete = true;
-  manager->map_dirty = found != 0U;
-  manager->next_step_us = now_us;
-  return found != 0U;
+  if (added) {
+    manager->map_dirty = true;
+  }
+  manager->discovery_complete =
+      (manager->map.valid_mask == BOARD_A_SENSOR_ALL_BOUND_MASK);
+  if ((manager->map.valid_mask == 0U) || search_failed) {
+    manager->next_discovery_us = now_us + BOARD_A_SENSOR_RETRY_PERIOD_US;
+  } else {
+    manager->next_discovery_us =
+        now_us + BOARD_A_SENSOR_DISCOVERY_RETRY_US;
+  }
+  if (manager->map.valid_mask == 0U) {
+    manager->next_step_us = manager->next_discovery_us;
+  }
+  return manager->map.valid_mask != 0U;
 }
 
 static void publish_failure(
@@ -274,7 +308,8 @@ bool board_a_sensor_manager_step(
     return false;
   }
 
-  if (!manager->discovery_complete) {
+  if (!manager->discovery_complete &&
+      (now_us >= manager->next_discovery_us)) {
     if (!discover_devices(manager, now_us)) {
       return false;
     }

@@ -9,7 +9,9 @@
 #define BOARD_A_SENSOR_COUNT 3U
 #define BOARD_A_SENSOR_SCAN_PERIOD_US 1000000ULL
 #define BOARD_A_SENSOR_RETRY_PERIOD_US 2000000ULL
+#define BOARD_A_SENSOR_DISCOVERY_RETRY_US 5000000ULL
 #define BOARD_A_SENSOR_NOT_PRESENT_FAILURES 3U
+#define BOARD_A_SENSOR_ALL_BOUND_MASK 0x07U
 
 enum {
   BOARD_A_SENSOR_TYPE_DHT11 = 1,
@@ -75,6 +77,7 @@ typedef struct {
   board_a_sensor_snapshot_t snapshot;
   uint8_t consecutive_failures[BOARD_A_SENSOR_COUNT];
   uint64_t next_step_us;
+  uint64_t next_discovery_us;
   uint64_t conversion_started_us;
   ds18b20_status_t conversion_status;
   bool discovery_complete;
