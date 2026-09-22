@@ -9,6 +9,7 @@ from .client import ModbusClient, TransactionResult
 from .errors import (
     ModbusClientError,
     ModbusException,
+    ProtocolError,
     StateError,
     UnsupportedProtocolError,
 )
@@ -22,6 +23,7 @@ from .protocol import (
 from .registers import (
     command_result_name,
     decode_command_observation,
+    decode_ds18b20_snapshot,
     decode_identity,
     decode_persistence_status,
     decode_snapshot,
@@ -55,7 +57,15 @@ INPUT_TIME_STATUS_START = 0x0016
 INPUT_TIME_STATUS_COUNT = 8
 INPUT_PERSISTENCE_STATUS_START = 0x0080
 INPUT_PERSISTENCE_STATUS_COUNT = 48
+INPUT_DS18B20_START = 0x00B0
+INPUT_DS18B20_COUNT = 24
 PROTOCOL_PERSISTENCE_VERSION = 3
+DS18B20_CONTRACT_REVISION = 2
+DS18B20_SENSOR_TYPE = 2
+DS18B20_SOURCE_NONE = 0
+DS18B20_SOURCE_REAL = 3
+DS18B20_QUALITY_NOT_PRESENT = 6
+DS18B20_QUALITIES_WITH_VALUE = ("OK", "STALE")
 
 
 class ModbusService:
@@ -103,6 +113,98 @@ class ModbusService:
         return decode_snapshot(
             self.read_input(INPUT_SNAPSHOT_START, INPUT_SNAPSHOT_COUNT)
         )
+
+    def read_temperature_snapshot(self) -> dict[str, Any]:
+        try:
+            values = self.read_input(INPUT_DS18B20_START, INPUT_DS18B20_COUNT)
+        except ModbusException as exc:
+            if exc.exception_code != 0x02:
+                raise
+            raise UnsupportedProtocolError(
+                "设备不支持 DS18B20 温度扩展块，接口尚未冻结",
+                interface_unavailable=True,
+                start=INPUT_DS18B20_START,
+                count=INPUT_DS18B20_COUNT,
+                exception_code=exc.exception_code,
+            ) from exc
+
+        decoded = decode_ds18b20_snapshot(values)
+        source_code = decoded["source_type"]
+        if (
+            decoded["contract_revision"] != DS18B20_CONTRACT_REVISION
+            or decoded["sensor_type_code"] != DS18B20_SENSOR_TYPE
+            or source_code not in (DS18B20_SOURCE_NONE, DS18B20_SOURCE_REAL)
+        ):
+            raise UnsupportedProtocolError(
+                "DS18B20 温度扩展块版本、类型或数据源不受支持",
+                interface_unavailable=True,
+                contract_revision=decoded["contract_revision"],
+                source_type=source_code,
+                sensor_type_code=decoded["sensor_type_code"],
+            )
+
+        valid_mask = decoded["valid_mask"]
+        if source_code == DS18B20_SOURCE_NONE and valid_mask != 0:
+            raise ProtocolError(
+                "DS18B20 块声明 source=NONE 却带非零有效位",
+                source_type=source_code,
+                valid_mask=valid_mask,
+            )
+        for sensor in decoded["sensors"]:
+            has_value = bool(valid_mask & (1 << sensor["sensor_id"]))
+            quality_with_value = sensor["quality"] in DS18B20_QUALITIES_WITH_VALUE
+            if has_value != quality_with_value:
+                raise ProtocolError(
+                    "DS18B20 块的有效位与质量码不一致",
+                    sensor_id=sensor["sensor_id"],
+                    quality=sensor["quality"],
+                    quality_code=sensor["quality_code"],
+                    valid_mask=valid_mask,
+                )
+
+        no_sample = (
+            source_code == DS18B20_SOURCE_NONE and valid_mask == 0
+        )
+        sensors = []
+        for sensor in decoded["sensors"]:
+            quality_code = (
+                DS18B20_QUALITY_NOT_PRESENT
+                if no_sample
+                else sensor["quality_code"]
+            )
+            if no_sample:
+                quality = "NOT_PRESENT"
+                temperature_x16 = None
+            else:
+                quality = sensor["quality"]
+                temperature_x16 = sensor["temperature_x16"]
+                if quality not in DS18B20_QUALITIES_WITH_VALUE:
+                    temperature_x16 = None
+            sensors.append(
+                {
+                    "sensor_id": sensor["sensor_id"],
+                    "sensor_type": sensor["sensor_type"],
+                    "valid": sensor["valid"],
+                    "temperature_x16": temperature_x16,
+                    "temperature_unit": sensor["temperature_unit"],
+                    "rom_short": sensor["rom_short"],
+                    "quality_code": quality_code,
+                    "quality": quality,
+                    "error_code": sensor["error_code"],
+                    "error": sensor["error"],
+                    "sample_time": sensor["sample_time_ms"],
+                    "source": decoded["source"],
+                }
+            )
+        return {
+            "contract_revision": decoded["contract_revision"],
+            "sample_id": decoded["sample_id"],
+            "source_type": source_code,
+            "source": decoded["source"],
+            "valid_mask": decoded["valid_mask"],
+            "sensors": sensors,
+            "sensor_type_code": decoded["sensor_type_code"],
+        }
 
     def stats(self) -> dict[str, Any]:
         return decode_stats(self.read_input(INPUT_STATS_START, INPUT_STATS_COUNT))
