@@ -123,6 +123,29 @@ bool board_a_runtime_copy_alarm_event(
   return copied;
 }
 
+bool board_a_runtime_copy_alarm_config(
+    board_a_runtime_t *runtime, board_a_alarm_config_t *config)
+{
+  bool copied;
+
+  if ((config == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_alarm_config(&runtime->slave.model, config);
+  runtime_unlock(runtime);
+  return copied;
+}
+
+void board_a_runtime_publish_alarm_buzzer_active(
+    board_a_runtime_t *runtime, bool active)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_set_alarm_buzzer_active(&runtime->slave.model, active);
+  runtime_unlock(runtime);
+}
+
 bool board_a_runtime_take_alarm_ack_request(board_a_runtime_t *runtime)
 {
   bool requested;
@@ -182,6 +205,7 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
   uint16_t run_state_before;
   bool start_pending_before;
   bool schedule_armed_before;
+  bool alarm_ack_requested_before;
   uint64_t next_sample_before;
   uint64_t schedule_deadline_before;
 
@@ -196,6 +220,7 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
   start_pending_before = runtime->slave.model.start_pending;
   next_sample_before = runtime->slave.model.next_sample_us;
   schedule_armed_before = runtime->slave.model.time.schedule_armed;
+  alarm_ack_requested_before = runtime->slave.model.alarm_ack_requested;
   schedule_deadline_before = runtime->slave.model.time.schedule_deadline_us;
   /*
    * Commands bind the monotonic instant of their own execution, so sample the
@@ -212,6 +237,8 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
         (version_before != runtime->slave.model.active_config.version) ||
         (run_state_before != (uint16_t)runtime->slave.model.run_state) ||
         (start_pending_before != runtime->slave.model.start_pending) ||
+        (alarm_ack_requested_before !=
+         runtime->slave.model.alarm_ack_requested) ||
         (next_sample_before != runtime->slave.model.next_sample_us) ||
         (schedule_armed_before != runtime->slave.model.time.schedule_armed) ||
         (schedule_deadline_before !=

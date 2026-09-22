@@ -36,6 +36,7 @@ static board_a_alarm_output_state_t g_output = {
     0U,
     false
 };
+static bool g_buzzer_on;
 
 static bool level_is_actuated(board_a_alarm_level_t level)
 {
@@ -47,6 +48,7 @@ static bool level_is_actuated(board_a_alarm_level_t level)
 
 static void set_outputs(bool buzzer_on, bool led0_on, bool led1_on)
 {
+  g_buzzer_on = buzzer_on;
   board_a_buzzer_port_set(buzzer_on);
   board_a_led_port_set(led0_on, led1_on);
 }
@@ -167,4 +169,9 @@ void board_a_alarm_output_update(const board_a_alarm_state_t *state,
 void board_a_alarm_output_force_off(void)
 {
   output_off();
+}
+
+bool board_a_alarm_output_buzzer_active(void)
+{
+  return g_buzzer_on;
 }

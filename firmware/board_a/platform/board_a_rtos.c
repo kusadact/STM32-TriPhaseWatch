@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "FreeRTOS.h"
 #include "../alarm/board_a_alarm.h"
@@ -97,6 +98,8 @@ static board_a_rx_recovery_t g_rx_recovery;
 static board_a_log_schedule_t g_log_schedule;
 static board_a_sensor_manager_t g_sensor_manager;
 static board_a_alarm_t g_alarm;
+static board_a_alarm_config_t g_applied_alarm_config;
+static bool g_alarm_config_applied;
 
 static QueueHandle_t g_rx_queue;
 static SemaphoreHandle_t g_model_mutex;
@@ -915,6 +918,38 @@ static void sensor_scan_if_due(uint64_t now_us)
   }
 }
 
+static void apply_alarm_config_if_changed(void)
+{
+  board_a_alarm_config_t config;
+
+  if (!board_a_runtime_copy_alarm_config(&g_runtime, &config)) {
+    return;
+  }
+  if (g_alarm_config_applied &&
+      (memcmp(&g_applied_alarm_config, &config, sizeof(config)) == 0)) {
+    return;
+  }
+  if (board_a_alarm_set_config(&g_alarm, &config)) {
+    g_applied_alarm_config = config;
+    g_alarm_config_applied = true;
+  }
+}
+
+static void process_alarm_ack_request(void)
+{
+  board_a_alarm_state_t state;
+
+  if (!board_a_runtime_take_alarm_ack_request(&g_runtime)) {
+    return;
+  }
+  board_a_alarm_ack(&g_alarm);
+  board_a_alarm_copy_state(&g_alarm, &state);
+  board_a_runtime_publish_alarm_state(&g_runtime, &state);
+  if (g_alarm_task != NULL) {
+    xTaskNotifyGive(g_alarm_task);
+  }
+}
+
 static void acquisition_task(void *argument)
 {
   board_a_runtime_status_t status;
@@ -930,6 +965,8 @@ static void acquisition_task(void *argument)
     uint64_t now_us = board_a_rtos_now_us(NULL);
     board_a_runtime_status_t before_tick;
 
+    process_alarm_ack_request();
+    apply_alarm_config_if_changed();
     /*
      * A due sensor scan runs before the scheduler tick so a new record uses
      * the latest complete DS18B20 snapshot. The record period remains anchored
@@ -988,6 +1025,7 @@ static void alarm_task(void *argument)
   board_a_alarm_state_t alarm_state;
   board_a_runtime_status_t status;
   uint32_t notification_value;
+  bool last_buzzer_active = false;
 
   (void)argument;
   taskENTER_CRITICAL();
@@ -1007,6 +1045,11 @@ static void alarm_task(void *argument)
           &alarm_state, alarm_active && alarm_state.valid, now_ms);
     } else {
       board_a_alarm_output_force_off();
+    }
+    if (board_a_alarm_output_buzzer_active() != last_buzzer_active) {
+      last_buzzer_active = board_a_alarm_output_buzzer_active();
+      board_a_runtime_publish_alarm_buzzer_active(
+          &g_runtime, last_buzzer_active);
     }
     g_board_a_rtos_diag.alarm_stack_min_words =
         uxTaskGetStackHighWaterMark(NULL);

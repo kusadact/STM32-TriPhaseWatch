@@ -79,6 +79,7 @@ static void check_output(bool buzzer_on, bool led0_on, bool led1_on)
   CHECK(fake_buzzer_on == buzzer_on);
   CHECK(fake_led0_on == led0_on);
   CHECK(fake_led1_on == led1_on);
+  CHECK(board_a_alarm_output_buzzer_active() == buzzer_on);
 }
 
 static void test_init_and_inactive_levels(void)

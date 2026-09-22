@@ -918,6 +918,7 @@ static void test_alarm_register_contract(void)
   state.critical_count = 0x33333333U;
   state.sensor_fault_count = 0x44444444U;
   board_a_model_publish_alarm_state(&slave.model, &state);
+  board_a_model_set_alarm_buzzer_active(&slave.model, true);
 
   CHECK(read_registers(&slave, 0x04U,
                        BOARD_A_INPUT_ALARM_CONTRACT_REVISION,
@@ -948,6 +949,7 @@ static void test_alarm_register_contract(void)
 
   state.acknowledged = true;
   board_a_model_publish_alarm_state(&slave.model, &state);
+  board_a_model_set_alarm_buzzer_active(&slave.model, false);
   CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_ALARM_FLAGS) == 0x0007U);
 
   request_length = make_read_request(
@@ -969,6 +971,7 @@ static void test_alarm_register_contract(void)
 static void test_alarm_config_contract(void)
 {
   board_a_slave_t slave;
+  board_a_alarm_config_t copied_config;
   uint16_t values[16];
   uint16_t delta[3] = {96U, 176U, 256U};
   uint16_t invalid[3] = {500U, 100U, 200U};
@@ -1042,6 +1045,10 @@ static void test_alarm_config_contract(void)
   CHECK(slave.model.active_config.alarm_config.delta_notice_x16 == 96);
   CHECK(slave.model.active_config.alarm_config.delta_warning_x16 == 176);
   CHECK(slave.model.active_config.alarm_config.delta_critical_x16 == 256);
+  CHECK(board_a_model_copy_alarm_config(&slave.model, &copied_config));
+  CHECK(copied_config.delta_notice_x16 == 96);
+  CHECK(copied_config.delta_warning_x16 == 176);
+  CHECK(copied_config.delta_critical_x16 == 256);
 }
 
 static void test_ack_alarm_command_dedup(void)

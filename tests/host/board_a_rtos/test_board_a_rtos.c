@@ -1168,12 +1168,16 @@ static void test_alarm_ack_request_take(void)
 {
   fake_lock_t context;
   board_a_runtime_t runtime;
+  board_a_alarm_config_t config;
   board_a_alarm_state_t state;
   board_a_alarm_state_t copied;
   uint16_t command_result;
   const uint32_t shared_id = 0x12345678U;
 
   p3b_runtime_setup(&runtime, &context, 18U);
+  CHECK(board_a_runtime_copy_alarm_config(&runtime, &config));
+  CHECK(config.delta_notice_x16 == 80);
+  CHECK(config.phase_critical_x16 == 1200);
   memset(&state, 0, sizeof(state));
   state.valid = true;
   state.level = BOARD_A_ALARM_WARNING;
@@ -1183,6 +1187,10 @@ static void test_alarm_ack_request_take(void)
   state.buzzer_enable = true;
   state.event_id = 5U;
   board_a_runtime_publish_alarm_state(&runtime, &state);
+  board_a_runtime_publish_alarm_buzzer_active(&runtime, true);
+  CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_ALARM_FLAGS,
+                         &command_result) &&
+        (command_result == 0x000BU));
 
   CHECK(runtime_submit_command(&runtime, BOARD_A_COMMAND_SINGLE, shared_id));
   CHECK(runtime_submit_command(&runtime, BOARD_A_COMMAND_ACK_ALARM,

@@ -365,6 +365,7 @@ typedef struct {
   board_a_alarm_event_type_t alarm_event_type;
   uint32_t alarm_event_id;
   uint64_t alarm_event_time_ms;
+  bool alarm_buzzer_active;
   board_a_snapshot_t snapshot;
   uint16_t data_source;
   board_a_run_state_t run_state;
@@ -424,6 +425,12 @@ void board_a_model_publish_alarm_result(
 
 bool board_a_model_copy_alarm_event(
     const board_a_model_t *model, board_a_alarm_result_t *result);
+
+bool board_a_model_copy_alarm_config(
+    const board_a_model_t *model, board_a_alarm_config_t *config);
+
+void board_a_model_set_alarm_buzzer_active(
+    board_a_model_t *model, bool active);
 
 bool board_a_model_take_alarm_ack_request(board_a_model_t *model);
 

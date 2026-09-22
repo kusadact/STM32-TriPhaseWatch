@@ -531,7 +531,8 @@ static modbus_result_t read_holding_register(const board_a_model_t *model,
   }
 }
 
-static uint16_t alarm_flags(const board_a_alarm_state_t *state)
+static uint16_t alarm_flags(const board_a_alarm_state_t *state,
+                            bool buzzer_active)
 {
   uint16_t flags = 0U;
 
@@ -544,14 +545,15 @@ static uint16_t alarm_flags(const board_a_alarm_state_t *state)
   if (state->acknowledged) {
     flags |= 0x0004U;
   }
-  if (state->latched && state->buzzer_enable && !state->acknowledged) {
+  if (buzzer_active) {
     flags |= 0x0008U;
   }
   return flags;
 }
 
 static modbus_result_t read_alarm_register(
-    const board_a_alarm_state_t *state, uint16_t address, uint16_t *value)
+    const board_a_alarm_state_t *state, bool buzzer_active,
+    uint16_t address, uint16_t *value)
 {
   switch (address) {
     case BOARD_A_INPUT_ALARM_CONTRACT_REVISION:
@@ -564,7 +566,7 @@ static modbus_result_t read_alarm_register(
       *value = (uint16_t)state->reason;
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_ALARM_FLAGS:
-      *value = alarm_flags(state);
+      *value = alarm_flags(state, buzzer_active);
       return MODBUS_RESULT_OK;
     case BOARD_A_INPUT_ALARM_TRIGGER_PHASE:
       *value = (uint16_t)state->trigger_phase;
@@ -722,7 +724,8 @@ static modbus_result_t read_input_register(
 {
   if ((address >= BOARD_A_INPUT_ALARM_CONTRACT_REVISION) &&
       (address <= BOARD_A_INPUT_ALARM_SENSOR_FAULT_COUNT_LO)) {
-    return read_alarm_register(alarm, address, value);
+    return read_alarm_register(alarm, model->alarm_buzzer_active,
+                               address, value);
   }
 
   switch (address) {
@@ -1146,6 +1149,7 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->alarm_event_type = BOARD_A_ALARM_EVENT_NONE;
   model->alarm_event_id = 0U;
   model->alarm_event_time_ms = 0U;
+  model->alarm_buzzer_active = false;
   model->data_source = BOARD_A_DATA_SOURCE_TEST;
   model->run_state = BOARD_A_RUN_STOPPED;
   model->session_id = session_id;
@@ -1280,6 +1284,24 @@ bool board_a_model_copy_alarm_event(
   result->event_time_ms = model->alarm_event_time_ms;
   result->state = model->alarm_state;
   return true;
+}
+
+bool board_a_model_copy_alarm_config(
+    const board_a_model_t *model, board_a_alarm_config_t *config)
+{
+  if ((model == NULL) || (config == NULL)) {
+    return false;
+  }
+  *config = model->active_config.alarm_config;
+  return true;
+}
+
+void board_a_model_set_alarm_buzzer_active(
+    board_a_model_t *model, bool active)
+{
+  if (model != NULL) {
+    model->alarm_buzzer_active = active;
+  }
 }
 
 bool board_a_model_take_alarm_ack_request(board_a_model_t *model)
