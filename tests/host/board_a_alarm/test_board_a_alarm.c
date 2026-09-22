@@ -79,6 +79,8 @@ static void test_config_validation(void)
 
   board_a_alarm_default_config(&config);
   CHECK(board_a_alarm_validate_config(&config));
+  CHECK(board_a_alarm_config_equal(&config, &config));
+  CHECK(!board_a_alarm_config_equal(&config, NULL));
   board_a_alarm_init(&alarm);
   CHECK(board_a_alarm_set_config(&alarm, &config));
   CHECK(alarm.state.buzzer_enable);
@@ -101,6 +103,9 @@ static void test_config_validation(void)
   invalid = config;
   invalid.buzzer_enable = 2U;
   CHECK(!board_a_alarm_validate_config(&invalid));
+  invalid = config;
+  invalid.clear_samples++;
+  CHECK(!board_a_alarm_config_equal(&config, &invalid));
   invalid = config;
   invalid.buzzer_enable = 0U;
   CHECK(board_a_alarm_validate_config(&invalid));

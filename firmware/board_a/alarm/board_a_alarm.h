@@ -134,6 +134,9 @@ void board_a_alarm_default_config(board_a_alarm_config_t *config);
 
 bool board_a_alarm_validate_config(const board_a_alarm_config_t *config);
 
+bool board_a_alarm_config_equal(const board_a_alarm_config_t *left,
+                                const board_a_alarm_config_t *right);
+
 void board_a_alarm_init(board_a_alarm_t *alarm);
 
 bool board_a_alarm_set_config(board_a_alarm_t *alarm,

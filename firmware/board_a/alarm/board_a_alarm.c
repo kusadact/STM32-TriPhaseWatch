@@ -588,6 +588,32 @@ bool board_a_alarm_validate_config(const board_a_alarm_config_t *config)
   return true;
 }
 
+bool board_a_alarm_config_equal(const board_a_alarm_config_t *left,
+                                const board_a_alarm_config_t *right)
+{
+  if ((left == NULL) || (right == NULL)) {
+    return false;
+  }
+  return (left->phase_notice_x16 == right->phase_notice_x16) &&
+      (left->phase_warning_x16 == right->phase_warning_x16) &&
+      (left->phase_critical_x16 == right->phase_critical_x16) &&
+      (left->delta_notice_x16 == right->delta_notice_x16) &&
+      (left->delta_warning_x16 == right->delta_warning_x16) &&
+      (left->delta_critical_x16 == right->delta_critical_x16) &&
+      (left->rise_notice_x16_per_min ==
+       right->rise_notice_x16_per_min) &&
+      (left->rise_warning_x16_per_min ==
+       right->rise_warning_x16_per_min) &&
+      (left->rise_critical_x16_per_min ==
+       right->rise_critical_x16_per_min) &&
+      (left->assert_samples == right->assert_samples) &&
+      (left->clear_samples == right->clear_samples) &&
+      (left->hysteresis_x16 == right->hysteresis_x16) &&
+      (left->rise_window_samples == right->rise_window_samples) &&
+      (left->rise_window_min_ms == right->rise_window_min_ms) &&
+      (left->buzzer_enable == right->buzzer_enable);
+}
+
 void board_a_alarm_init(board_a_alarm_t *alarm)
 {
   if (alarm == NULL) {
