@@ -12,6 +12,8 @@
 #define BOARD_A_SENSOR_DISCOVERY_RETRY_US 5000000ULL
 #define BOARD_A_SENSOR_NOT_PRESENT_FAILURES 3U
 #define BOARD_A_SENSOR_ALL_BOUND_MASK 0x07U
+/* N devices need N search passes plus one terminating pass; +1 is margin. */
+#define BOARD_A_SENSOR_SEARCH_PASS_LIMIT (BOARD_A_SENSOR_COUNT + 2U)
 
 enum {
   BOARD_A_SENSOR_TYPE_DHT11 = 1,

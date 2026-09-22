@@ -282,6 +282,36 @@ static void test_missing_bound_rom_is_not_replaced(void)
   CHECK(snapshot.valid_mask == 0x0002U);
 }
 
+static void test_scan_stops_once_all_slots_are_bound(void)
+{
+  fake_bus_t bus = make_bus(3U);
+  ds18b20_port_t port = make_port(&bus);
+  board_a_sensor_manager_t manager;
+  board_a_sensor_map_t map;
+  board_a_sensor_snapshot_t snapshot;
+
+  memset(&map, 0, sizeof(map));
+  map.valid_mask = 0x03U;
+  map.bindings[0].bound = true;
+  memcpy(map.bindings[0].rom, bus.devices[0].rom, DS18B20_ROM_SIZE);
+  map.bindings[1].bound = true;
+  memcpy(map.bindings[1].rom, bus.devices[1].rom, DS18B20_ROM_SIZE);
+
+  board_a_sensor_manager_init(&manager, &port);
+  CHECK(board_a_sensor_manager_set_map(&manager, &map));
+  CHECK(!discover(&manager, &bus));
+  CHECK(manager.map.valid_mask == 0x07U);
+  /*
+   * Enumerating three devices needs three search passes plus a terminating
+   * pass. The scan must stop the moment the last slot is filled, so it may not
+   * walk the whole tree (that is what kept the acquisition task busy forever
+   * on the bench when the bus did not terminate the search by itself).
+   */
+  CHECK(bus.search_passes <= 3U);
+  CHECK(read_after_conversion(&manager, &bus, &snapshot));
+  CHECK(snapshot.valid_mask == 0x0007U);
+}
+
 int main(void)
 {
   test_auto_discovery_and_three_temperatures();
@@ -290,6 +320,7 @@ int main(void)
   test_partial_map_fills_free_slots_without_renumbering();
   test_full_map_is_not_rescanned();
   test_missing_bound_rom_is_not_replaced();
+  test_scan_stops_once_all_slots_are_bound();
   printf("DS18B20 manager host tests: %u checks, %u failures\n",
          g_checks, g_failures);
   return g_failures == 0U ? 0 : 1;

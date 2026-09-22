@@ -42,6 +42,7 @@ typedef struct {
   uint8_t match_bits;
   uint8_t match_rom[DS18B20_ROM_SIZE];
   uint8_t search_bit;
+  uint8_t search_passes;
   bool search_complement;
   bool search_expect_direction;
   uint8_t read_byte_index;
@@ -184,6 +185,7 @@ static void fake_process_command(fake_bus_t *bus)
       bus->phase = FAKE_PHASE_COMMAND;
       break;
     case 0xF0U:
+      bus->search_passes++;
       bus->phase = FAKE_PHASE_SEARCH_ROM;
       bus->active_mask = 0U;
       for (index = 0U; index < bus->device_count; ++index) {

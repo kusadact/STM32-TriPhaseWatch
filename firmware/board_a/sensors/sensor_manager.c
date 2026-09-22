@@ -229,10 +229,21 @@ static bool discover_devices(
   ds18b20_status_t status;
   bool added = false;
   bool search_failed = false;
+  uint8_t passes = 0U;
 
   ds18b20_search_start(&manager->bus);
-  for (;;) {
-    int slot;
+  while (passes < BOARD_A_SENSOR_SEARCH_PASS_LIMIT) {
+    int slot = free_slot_for(&manager->map);
+
+    /*
+     * Every slot is bound: nothing more can be learned from the bus, so stop
+     * enumerating. Without this an uncooperative (or noisy) bus could keep the
+     * ROM search running and starve the rest of the system.
+     */
+    if (slot < 0) {
+      break;
+    }
+    passes++;
 
     status = ds18b20_search_next(&manager->bus, &rom);
     if (status == DS18B20_STATUS_NO_MORE_DEVICES) {
@@ -245,15 +256,15 @@ static bool discover_devices(
     if (rom_is_bound(&manager->map, &rom)) {
       continue;
     }
-    slot = free_slot_for(&manager->map);
-    if (slot < 0) {
-      break;
-    }
     memcpy(manager->map.bindings[slot].rom, rom.bytes, DS18B20_ROM_SIZE);
     manager->map.bindings[slot].rom_short = rom_short_id(rom.bytes);
     manager->map.bindings[slot].bound = true;
     manager->map.valid_mask |= (uint8_t)(1U << (uint8_t)slot);
     added = true;
+  }
+  if (passes >= BOARD_A_SENSOR_SEARCH_PASS_LIMIT) {
+    /* Bounded scan aborted: keep whatever was found and retry later. */
+    search_failed = true;
   }
 
   if (added) {
