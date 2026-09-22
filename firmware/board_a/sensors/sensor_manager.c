@@ -225,11 +225,15 @@ static bool rom_is_bound(const board_a_sensor_map_t *map,
 static bool discover_devices(
     board_a_sensor_manager_t *manager, uint64_t now_us)
 {
+  const ds18b20_port_t *port = manager->bus.port;
   ds18b20_rom_t rom;
   ds18b20_status_t status;
   bool added = false;
   bool search_failed = false;
   uint8_t passes = 0U;
+  uint64_t start_us =
+      ((port != NULL) && (port->now_us != NULL)) ?
+      port->now_us(port->context) : now_us;
 
   ds18b20_search_start(&manager->bus);
   while (passes < BOARD_A_SENSOR_SEARCH_PASS_LIMIT) {
@@ -241,6 +245,17 @@ static bool discover_devices(
      * ROM search running and starve the rest of the system.
      */
     if (slot < 0) {
+      break;
+    }
+    /*
+     * Bound the work of a single attempt independently of the slot count: a
+     * bus that never terminates its ROM search must not keep the acquisition
+     * task busy. The check happens between passes, so one pass may overshoot.
+     */
+    if (((port != NULL) && (port->now_us != NULL)) &&
+        ((port->now_us(port->context) - start_us) >=
+         BOARD_A_SENSOR_DISCOVERY_BUDGET_US)) {
+      search_failed = true;
       break;
     }
     passes++;
