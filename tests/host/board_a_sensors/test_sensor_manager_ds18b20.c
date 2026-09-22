@@ -312,6 +312,27 @@ static void test_scan_stops_once_all_slots_are_bound(void)
   CHECK(snapshot.valid_mask == 0x0007U);
 }
 
+static void test_slow_bus_is_bounded_by_time_budget(void)
+{
+  fake_bus_t bus = make_bus(1U);
+  ds18b20_port_t port = make_port(&bus);
+  board_a_sensor_manager_t manager;
+
+  /*
+   * Model a bus where every level read costs an extra millisecond: one search
+   * pass already blows the 50 ms discovery budget, so the scan must stop after
+   * that pass instead of walking the tree again.
+   */
+  bus.slow_read_us = 1000U;
+
+  board_a_sensor_manager_init(&manager, &port);
+  CHECK(!discover(&manager, &bus));
+  CHECK(bus.search_passes == 1U);
+  CHECK(manager.map.valid_mask == 0x01U);
+  CHECK(!manager.discovery_complete);
+  CHECK(manager.next_discovery_us > bus.now_us);
+}
+
 int main(void)
 {
   test_auto_discovery_and_three_temperatures();
@@ -321,6 +342,7 @@ int main(void)
   test_full_map_is_not_rescanned();
   test_missing_bound_rom_is_not_replaced();
   test_scan_stops_once_all_slots_are_bound();
+  test_slow_bus_is_bounded_by_time_budget();
   printf("DS18B20 manager host tests: %u checks, %u failures\n",
          g_checks, g_failures);
   return g_failures == 0U ? 0 : 1;

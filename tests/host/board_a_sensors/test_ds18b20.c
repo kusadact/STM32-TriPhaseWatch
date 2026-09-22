@@ -43,6 +43,7 @@ typedef struct {
   uint8_t match_rom[DS18B20_ROM_SIZE];
   uint8_t search_bit;
   uint8_t search_passes;
+  uint32_t slow_read_us;
   bool search_complement;
   bool search_expect_direction;
   uint8_t read_byte_index;
@@ -115,6 +116,7 @@ static uint64_t fake_now_us(void *context)
 static void fake_delay_us(void *context, uint32_t delay_us)
 {
   fake_bus_t *bus = (fake_bus_t *)context;
+
   bus->now_us += delay_us;
 }
 
@@ -314,9 +316,8 @@ static void fake_release_bus(void *context)
   fake_write_bit(bus, low_us < 15U);
 }
 
-static bool fake_read_level(void *context)
+static bool fake_read_level_inner(fake_bus_t *bus)
 {
-  fake_bus_t *bus = (fake_bus_t *)context;
   uint8_t value = 1U;
   uint8_t index;
 
@@ -367,6 +368,23 @@ static bool fake_read_level(void *context)
     return value != 0U;
   }
   return true;
+}
+
+/*
+ * Test-only knob: a bus whose level reads cost extra time *after* the level is
+ * sampled. Bit values stay correct and the presence pulse is still visible, so
+ * the protocol keeps working while one discovery pass can be made to exceed the
+ * firmware's discovery work budget.
+ */
+static bool fake_read_level(void *context)
+{
+  fake_bus_t *bus = (fake_bus_t *)context;
+  bool level = fake_read_level_inner(bus);
+
+  if (bus->slow_read_us != 0U) {
+    bus->now_us += bus->slow_read_us;
+  }
+  return level;
 }
 
 static ds18b20_port_t make_port(fake_bus_t *bus)
