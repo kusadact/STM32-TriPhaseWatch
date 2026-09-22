@@ -3,6 +3,7 @@
 
 #include "FreeRTOS.h"
 #include "../alarm/board_a_alarm.h"
+#include "../alarm/board_a_alarm_output.h"
 #include "../sensors/sensor_manager.h"
 #include "board_a_log_schedule.h"
 #include "board_a_monotonic.h"
@@ -24,13 +25,16 @@
 #define BOARD_A_RX_QUEUE_CAPACITY 512U
 #define BOARD_A_COMM_TASK_PRIORITY 3U
 #define BOARD_A_ACQUISITION_TASK_PRIORITY 4U
+#define BOARD_A_ALARM_TASK_PRIORITY 2U
 #define BOARD_A_COMM_STACK_WORDS 1024U
 #define BOARD_A_ACQUISITION_STACK_WORDS 512U
+#define BOARD_A_ALARM_STACK_WORDS 256U
 #define BOARD_A_CONFIG_STACK_WORDS 512U
 #define BOARD_A_STORAGE_STACK_WORDS 1024U
 #define BOARD_A_IDLE_STACK_WORDS 128U
 #define BOARD_A_LOG_PERIOD_US 5000000ULL
 #define BOARD_A_MAX_WAIT_MS 1000U
+#define BOARD_A_ALARM_WAIT_MS 10U
 #define BOARD_A_MONOTONIC_MAX_GAP_US 60000000U
 
 #define BOARD_A_USART2_PREEMPTION_PRIORITY 5U
@@ -53,6 +57,7 @@ typedef struct {
   volatile uint32_t task_ready_mask;
   volatile uint32_t comm_stack_min_words;
   volatile uint32_t acquisition_stack_min_words;
+  volatile uint32_t alarm_stack_min_words;
   volatile uint32_t config_stack_min_words;
   volatile uint32_t storage_stack_min_words;
   volatile uint32_t idle_stack_min_words;
@@ -97,6 +102,7 @@ static QueueHandle_t g_rx_queue;
 static SemaphoreHandle_t g_model_mutex;
 static TaskHandle_t g_comm_task;
 static TaskHandle_t g_acquisition_task;
+static TaskHandle_t g_alarm_task;
 static TaskHandle_t g_config_task;
 static TaskHandle_t g_storage_task;
 
@@ -114,12 +120,15 @@ _Static_assert(sizeof(g_rx_queue_storage) >=
 static StaticSemaphore_t g_model_mutex_buffer;
 static StaticTask_t g_comm_task_buffer;
 static StaticTask_t g_acquisition_task_buffer;
+static StaticTask_t g_alarm_task_buffer;
 static StaticTask_t g_config_task_buffer;
 static StaticTask_t g_storage_task_buffer;
 static StaticTask_t g_idle_task_buffer;
 static StackType_t g_comm_stack[BOARD_A_COMM_STACK_WORDS]
     __attribute__((aligned(8)));
 static StackType_t g_acquisition_stack[BOARD_A_ACQUISITION_STACK_WORDS]
+    __attribute__((aligned(8)));
+static StackType_t g_alarm_stack[BOARD_A_ALARM_STACK_WORDS]
     __attribute__((aligned(8)));
 static StackType_t g_config_stack[BOARD_A_CONFIG_STACK_WORDS]
     __attribute__((aligned(8)));
@@ -156,6 +165,7 @@ void SysTick_Handler(void)
 static void board_a_rtos_fatal(uint32_t fault)
 {
   g_board_a_rtos_diag.fault_flags |= fault;
+  board_a_alarm_output_force_off();
   __disable_irq();
   for (;;) {
   }
@@ -806,6 +816,9 @@ static void comm_task(void *argument)
         &scheduling_state_changed);
     if (scheduling_state_changed) {
       xTaskNotifyGive(g_acquisition_task);
+      if (g_alarm_task != NULL) {
+        xTaskNotifyGive(g_alarm_task);
+      }
     }
     if (response_length != 0U) {
       (void)tx_send(g_response, (uint16_t)response_length);
@@ -885,6 +898,9 @@ static void sensor_scan_if_due(uint64_t now_us)
     board_a_runtime_publish_sensor_snapshot(&g_runtime, &snapshot);
     if (board_a_alarm_update(&g_alarm, &snapshot, &alarm_result)) {
       board_a_runtime_publish_alarm_result(&g_runtime, &alarm_result);
+      if (g_alarm_task != NULL) {
+        xTaskNotifyGive(g_alarm_task);
+      }
     }
   }
   if (board_a_sensor_manager_take_map_dirty(&g_sensor_manager) &&
@@ -967,6 +983,39 @@ static void acquisition_task(void *argument)
   }
 }
 
+static void alarm_task(void *argument)
+{
+  board_a_alarm_state_t alarm_state;
+  board_a_runtime_status_t status;
+  uint32_t notification_value;
+
+  (void)argument;
+  taskENTER_CRITICAL();
+  g_board_a_rtos_diag.task_ready_mask |= 1U << 2;
+  taskEXIT_CRITICAL();
+
+  for (;;) {
+    uint32_t now_ms = board_a_rtos_now_ms();
+    bool alarm_active = false;
+
+    if (board_a_runtime_copy_status(&g_runtime, &status) &&
+        (status.data_source == BOARD_A_DATA_SOURCE_REAL_DS18B20)) {
+      alarm_active = true;
+    }
+    if (board_a_runtime_copy_alarm_state(&g_runtime, &alarm_state)) {
+      board_a_alarm_output_update(
+          &alarm_state, alarm_active && alarm_state.valid, now_ms);
+    } else {
+      board_a_alarm_output_force_off();
+    }
+    g_board_a_rtos_diag.alarm_stack_min_words =
+        uxTaskGetStackHighWaterMark(NULL);
+    (void)xTaskNotifyWait(0U, 0xFFFFFFFFUL, &notification_value,
+                          pdMS_TO_TICKS(BOARD_A_ALARM_WAIT_MS));
+    (void)notification_value;
+  }
+}
+
 static void create_runtime_objects(void)
 {
   g_model_mutex = xSemaphoreCreateMutexStatic(&g_model_mutex_buffer);
@@ -989,6 +1038,9 @@ static void create_runtime_objects(void)
       acquisition_task, "acq", BOARD_A_ACQUISITION_STACK_WORDS, NULL,
       BOARD_A_ACQUISITION_TASK_PRIORITY, g_acquisition_stack,
       &g_acquisition_task_buffer);
+  g_alarm_task = xTaskCreateStatic(
+      alarm_task, "alarm", BOARD_A_ALARM_STACK_WORDS, NULL,
+      BOARD_A_ALARM_TASK_PRIORITY, g_alarm_stack, &g_alarm_task_buffer);
   g_config_task = xTaskCreateStatic(
       board_a_config_task, "config", BOARD_A_CONFIG_STACK_WORDS, &g_runtime,
       1U, g_config_stack, &g_config_task_buffer);
@@ -996,6 +1048,7 @@ static void create_runtime_objects(void)
       board_a_storage_task, "storage", BOARD_A_STORAGE_STACK_WORDS,
       &g_runtime, 1U, g_storage_stack, &g_storage_task_buffer);
   if ((g_comm_task == NULL) || (g_acquisition_task == NULL) ||
+      (g_alarm_task == NULL) ||
       (g_config_task == NULL) || (g_storage_task == NULL)) {
     board_a_rtos_fatal(BOARD_A_FAULT_TASK_CREATE);
   }
@@ -1019,6 +1072,7 @@ int board_a_rtos_run(void)
   sensor_gpio_init();
   board_a_sensor_manager_init(&g_sensor_manager, &g_sensor_port);
   board_a_alarm_init(&g_alarm);
+  board_a_alarm_output_init();
   create_runtime_objects();
   rs485_init();
   board_a_persistence_startup(&g_runtime);
