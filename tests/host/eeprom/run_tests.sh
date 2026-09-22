@@ -32,6 +32,7 @@ echo "HOST test_config_store"
   -I"$BOARD_A_CORE_DIR" \
   "$ROOT_DIR/firmware/app/config_store.c" \
   "$BOARD_A_CORE_DIR/board_a_record_format.c" \
+  "$ROOT_DIR/firmware/board_a/sensors/ds18b20.c" \
   "$SCRIPT_DIR/test_config_store.c" \
   -o "$BUILD_DIR/test_config_store"
 "$BUILD_DIR/test_config_store"

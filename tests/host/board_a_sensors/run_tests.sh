@@ -11,10 +11,17 @@ CC="${CC:-clang}"
 mkdir -p "$BUILD_DIR"
 
 "$CC" -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g \
-  -I"$SENSOR_DIR" \
-  "$SCRIPT_DIR/test_dht11.c" \
-  "$SENSOR_DIR/dht11.c" \
-  "$SENSOR_DIR/sensor_manager.c" \
-  -o "$BINARY"
+  -I"$SENSOR_DIR" -I"$SCRIPT_DIR" \
+  "$SCRIPT_DIR/test_ds18b20.c" \
+  "$SENSOR_DIR/ds18b20.c" \
+  -o "$BUILD_DIR/test_ds18b20"
 
-"$BINARY"
+"$CC" -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g \
+  -I"$SENSOR_DIR" -I"$SCRIPT_DIR" \
+  "$SCRIPT_DIR/test_sensor_manager_ds18b20.c" \
+  "$SENSOR_DIR/ds18b20.c" \
+  "$SENSOR_DIR/sensor_manager.c" \
+  -o "$BUILD_DIR/test_sensor_manager_ds18b20"
+
+"$BUILD_DIR/test_ds18b20"
+"$BUILD_DIR/test_sensor_manager_ds18b20"

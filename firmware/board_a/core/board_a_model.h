@@ -155,34 +155,34 @@ enum {
 };
 
 /*
- * DHT11 extension block. It is intentionally separate from the frozen
- * protocol-3 persistence block and keeps per-sensor quality/error/time.
+ * DS18B20 extension block. It reuses the P6 extension address range but
+ * advances the contract revision so DHT11 clients cannot misinterpret it.
  */
 enum {
-  BOARD_A_INPUT_DHT11_CONTRACT_REVISION = 0x00B0,
-  BOARD_A_INPUT_DHT11_SOURCE_TYPE = 0x00B1,
-  BOARD_A_INPUT_DHT11_VALID_MASK = 0x00B2,
-  BOARD_A_INPUT_DHT11_SAMPLE_ID_HI = 0x00B3,
-  BOARD_A_INPUT_DHT11_SAMPLE_ID_LO = 0x00B4,
-  BOARD_A_INPUT_DHT11_TEMPERATURE_0 = 0x00B5,
-  BOARD_A_INPUT_DHT11_TEMPERATURE_1 = 0x00B6,
-  BOARD_A_INPUT_DHT11_TEMPERATURE_2 = 0x00B7,
-  BOARD_A_INPUT_DHT11_HUMIDITY_0 = 0x00B8,
-  BOARD_A_INPUT_DHT11_HUMIDITY_1 = 0x00B9,
-  BOARD_A_INPUT_DHT11_HUMIDITY_2 = 0x00BA,
-  BOARD_A_INPUT_DHT11_QUALITY_0 = 0x00BB,
-  BOARD_A_INPUT_DHT11_QUALITY_1 = 0x00BC,
-  BOARD_A_INPUT_DHT11_QUALITY_2 = 0x00BD,
-  BOARD_A_INPUT_DHT11_ERROR_0 = 0x00BE,
-  BOARD_A_INPUT_DHT11_ERROR_1 = 0x00BF,
-  BOARD_A_INPUT_DHT11_ERROR_2 = 0x00C0,
-  BOARD_A_INPUT_DHT11_SAMPLE_TIME_0_HI = 0x00C1,
-  BOARD_A_INPUT_DHT11_SAMPLE_TIME_0_LO = 0x00C2,
-  BOARD_A_INPUT_DHT11_SAMPLE_TIME_1_HI = 0x00C3,
-  BOARD_A_INPUT_DHT11_SAMPLE_TIME_1_LO = 0x00C4,
-  BOARD_A_INPUT_DHT11_SAMPLE_TIME_2_HI = 0x00C5,
-  BOARD_A_INPUT_DHT11_SAMPLE_TIME_2_LO = 0x00C6,
-  BOARD_A_INPUT_DHT11_SENSOR_TYPE = 0x00C7
+  BOARD_A_INPUT_DS18B20_CONTRACT_REVISION = 0x00B0,
+  BOARD_A_INPUT_DS18B20_SOURCE_TYPE = 0x00B1,
+  BOARD_A_INPUT_DS18B20_VALID_MASK = 0x00B2,
+  BOARD_A_INPUT_DS18B20_SAMPLE_ID_HI = 0x00B3,
+  BOARD_A_INPUT_DS18B20_SAMPLE_ID_LO = 0x00B4,
+  BOARD_A_INPUT_DS18B20_TEMPERATURE_0 = 0x00B5,
+  BOARD_A_INPUT_DS18B20_TEMPERATURE_1 = 0x00B6,
+  BOARD_A_INPUT_DS18B20_TEMPERATURE_2 = 0x00B7,
+  BOARD_A_INPUT_DS18B20_QUALITY_0 = 0x00B8,
+  BOARD_A_INPUT_DS18B20_QUALITY_1 = 0x00B9,
+  BOARD_A_INPUT_DS18B20_QUALITY_2 = 0x00BA,
+  BOARD_A_INPUT_DS18B20_ERROR_0 = 0x00BB,
+  BOARD_A_INPUT_DS18B20_ERROR_1 = 0x00BC,
+  BOARD_A_INPUT_DS18B20_ERROR_2 = 0x00BD,
+  BOARD_A_INPUT_DS18B20_SAMPLE_TIME_0_HI = 0x00BE,
+  BOARD_A_INPUT_DS18B20_SAMPLE_TIME_0_LO = 0x00BF,
+  BOARD_A_INPUT_DS18B20_SAMPLE_TIME_1_HI = 0x00C0,
+  BOARD_A_INPUT_DS18B20_SAMPLE_TIME_1_LO = 0x00C1,
+  BOARD_A_INPUT_DS18B20_SAMPLE_TIME_2_HI = 0x00C2,
+  BOARD_A_INPUT_DS18B20_SAMPLE_TIME_2_LO = 0x00C3,
+  BOARD_A_INPUT_DS18B20_SENSOR_TYPE = 0x00C4,
+  BOARD_A_INPUT_DS18B20_ROM_SHORT_0 = 0x00C5,
+  BOARD_A_INPUT_DS18B20_ROM_SHORT_1 = 0x00C6,
+  BOARD_A_INPUT_DS18B20_ROM_SHORT_2 = 0x00C7
 };
 
 typedef enum {
@@ -217,7 +217,8 @@ typedef enum {
 
 enum {
   BOARD_A_DATA_SOURCE_TEST = 1,
-  BOARD_A_DATA_SOURCE_REAL_DHT11 = 2
+  BOARD_A_DATA_SOURCE_REAL_DHT11 = 2,
+  BOARD_A_DATA_SOURCE_REAL_DS18B20 = 3
 };
 
 enum {
@@ -237,7 +238,8 @@ enum {
 
 enum {
   BOARD_A_UNIT_NONE = 0,
-  BOARD_A_UNIT_COUNT = 1
+  BOARD_A_UNIT_COUNT = 1,
+  BOARD_A_UNIT_TEMPERATURE_X16 = 2
 };
 
 typedef struct {
@@ -303,6 +305,7 @@ typedef struct {
   board_a_config_t pending_config;
   board_a_active_config_t active_config;
   board_a_sensor_snapshot_t pending_sensor_snapshot;
+  board_a_sensor_map_t sensor_map;
   board_a_snapshot_t snapshot;
   uint16_t data_source;
   board_a_run_state_t run_state;
@@ -336,6 +339,12 @@ bool board_a_model_set_data_source(board_a_model_t *model,
 void board_a_model_publish_sensor_snapshot(
     board_a_model_t *model,
     const board_a_sensor_snapshot_t *snapshot);
+
+bool board_a_model_publish_sensor_map(
+    board_a_model_t *model, const board_a_sensor_map_t *map);
+
+bool board_a_model_copy_sensor_map(
+    const board_a_model_t *model, board_a_sensor_map_t *map);
 
 modbus_result_t board_a_model_read_registers(void *context,
                                              modbus_register_space_t space,

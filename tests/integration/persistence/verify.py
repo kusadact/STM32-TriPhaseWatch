@@ -1226,7 +1226,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Read a completed P5 run directory and copied LOG CSV files, "
-            "then independently verify schema 1/2, payloads, counters, and hashes."
+            "then independently verify schema 1/2/3, payloads, counters, and hashes."
         )
     )
     parser.add_argument(

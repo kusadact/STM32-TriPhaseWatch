@@ -37,7 +37,7 @@
 _Static_assert(configPRIO_BITS == 4U, "board A expects four NVIC priority bits");
 _Static_assert(configTICK_RATE_HZ == 1000U, "board A expects a 1 kHz tick");
 _Static_assert(BOARD_A_ACQUISITION_TASK_PRIORITY < configMAX_PRIORITIES,
-               "DHT11 acquisition priority must be valid");
+               "DS18B20 acquisition priority must be valid");
 _Static_assert(BOARD_A_USART2_PREEMPTION_PRIORITY ==
                    configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY,
                "USART2 priority must be at or below the RTOS syscall limit");
@@ -90,13 +90,6 @@ static board_a_tx_t g_tx;
 static board_a_rx_recovery_t g_rx_recovery;
 static board_a_log_schedule_t g_log_schedule;
 static board_a_sensor_manager_t g_sensor_manager;
-
-static GPIO_TypeDef *const g_sensor_gpios[BOARD_A_SENSOR_COUNT] = {
-  GPIOG, GPIOF, GPIOE
-};
-static const uint16_t g_sensor_pins[BOARD_A_SENSOR_COUNT] = {
-  GPIO_Pin_9, GPIO_Pin_6, GPIO_Pin_5
-};
 
 static QueueHandle_t g_rx_queue;
 static SemaphoreHandle_t g_model_mutex;
@@ -302,93 +295,68 @@ static uint64_t sensor_port_now_us(void *context)
 
 static void sensor_port_delay_us(void *context, uint32_t delay_us)
 {
-  uint32_t delay_ms;
+  uint64_t started_us;
 
   (void)context;
-  /*
-   * The protocol's long delay is the 18 ms start pulse. Blocking that on the
-   * RTOS tick lets CommTask and the storage/config tasks continue to run.
-   */
-  delay_ms = (delay_us + 999U) / 1000U;
-  if (delay_ms == 0U) {
-    taskYIELD();
-  } else {
-    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+  started_us = board_a_rtos_now_us(NULL);
+  while ((board_a_rtos_now_us(NULL) - started_us) < delay_us) {
+    /* 1-Wire timing is microsecond-scale; keep this bounded and short. */
   }
 }
 
-static void sensor_port_drive_low(void *context, uint8_t sensor_id)
+static void sensor_port_drive_low(void *context)
 {
   GPIO_InitTypeDef gpio;
 
   (void)context;
-  gpio.GPIO_Pin = g_sensor_pins[sensor_id];
+  gpio.GPIO_Pin = GPIO_Pin_9;
   gpio.GPIO_Mode = GPIO_Mode_OUT;
   gpio.GPIO_Speed = GPIO_Speed_50MHz;
   gpio.GPIO_OType = GPIO_OType_PP;
   gpio.GPIO_PuPd = GPIO_PuPd_NOPULL;
-  GPIO_Init(g_sensor_gpios[sensor_id], &gpio);
-  GPIO_ResetBits(g_sensor_gpios[sensor_id], g_sensor_pins[sensor_id]);
+  GPIO_Init(GPIOG, &gpio);
+  GPIO_ResetBits(GPIOG, GPIO_Pin_9);
 }
 
-static void sensor_port_release_input(void *context, uint8_t sensor_id)
+static void sensor_port_release_bus(void *context)
 {
   GPIO_InitTypeDef gpio;
 
   (void)context;
-  gpio.GPIO_Pin = g_sensor_pins[sensor_id];
+  gpio.GPIO_Pin = GPIO_Pin_9;
   gpio.GPIO_Mode = GPIO_Mode_IN;
   gpio.GPIO_Speed = GPIO_Speed_50MHz;
   gpio.GPIO_OType = GPIO_OType_PP;
   gpio.GPIO_PuPd = GPIO_PuPd_UP;
-  GPIO_Init(g_sensor_gpios[sensor_id], &gpio);
+  GPIO_Init(GPIOG, &gpio);
 }
 
-static bool sensor_port_read_level(void *context, uint8_t sensor_id)
+static bool sensor_port_read_level(void *context)
 {
   (void)context;
-  return GPIO_ReadInputDataBit(g_sensor_gpios[sensor_id],
-                               g_sensor_pins[sensor_id]) != Bit_RESET;
+  return GPIO_ReadInputDataBit(GPIOG, GPIO_Pin_9) != Bit_RESET;
 }
 
-static void sensor_port_begin_read(void *context, uint8_t sensor_id)
-{
-  (void)context;
-  (void)sensor_id;
-}
-
-static void sensor_port_end_read(void *context, uint8_t sensor_id)
-{
-  (void)context;
-  (void)sensor_id;
-}
-
-static const dht11_port_t g_sensor_port = {
+static const ds18b20_port_t g_sensor_port = {
   NULL,
   sensor_port_now_us,
   sensor_port_delay_us,
   sensor_port_drive_low,
-  sensor_port_release_input,
-  sensor_port_read_level,
-  sensor_port_begin_read,
-  sensor_port_end_read
+  sensor_port_release_bus,
+  sensor_port_read_level
 };
 
 static void sensor_gpio_init(void)
 {
   GPIO_InitTypeDef gpio;
-  uint8_t index;
 
-  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOE | RCC_AHB1Periph_GPIOF |
-                         RCC_AHB1Periph_GPIOG, ENABLE);
+  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOG, ENABLE);
   gpio.GPIO_Mode = GPIO_Mode_IN;
   gpio.GPIO_Speed = GPIO_Speed_50MHz;
   gpio.GPIO_OType = GPIO_OType_PP;
   gpio.GPIO_PuPd = GPIO_PuPd_UP;
-  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
-    gpio.GPIO_Pin = g_sensor_pins[index];
-    GPIO_Init(g_sensor_gpios[index], &gpio);
-  }
+  gpio.GPIO_Pin = GPIO_Pin_9;
+  GPIO_Init(GPIOG, &gpio);
 }
 
 void board_a_rtos_note_config_stack(uint32_t min_words)
@@ -897,13 +865,31 @@ static void sensor_scan_if_due(uint64_t now_us)
 {
   board_a_runtime_status_t status;
   board_a_sensor_snapshot_t snapshot;
+  board_a_sensor_map_t runtime_map;
+  board_a_sensor_map_t manager_map;
 
   if (!board_a_runtime_copy_status(&g_runtime, &status) ||
-      (status.data_source != BOARD_A_DATA_SOURCE_REAL_DHT11)) {
+      (status.data_source != BOARD_A_DATA_SOURCE_REAL_DS18B20)) {
     return;
   }
-  if (board_a_sensor_manager_scan(&g_sensor_manager, now_us, &snapshot)) {
+  if (board_a_runtime_copy_sensor_map(&g_runtime, &runtime_map) &&
+      (runtime_map.valid_mask != 0U) &&
+      board_a_sensor_manager_copy_map(&g_sensor_manager, &manager_map) &&
+      (manager_map.valid_mask == 0U)) {
+    (void)board_a_sensor_manager_set_map(&g_sensor_manager, &runtime_map);
+  }
+  if (board_a_sensor_manager_step(&g_sensor_manager, now_us, &snapshot)) {
     board_a_runtime_publish_sensor_snapshot(&g_runtime, &snapshot);
+  }
+  if (board_a_sensor_manager_take_map_dirty(&g_sensor_manager) &&
+      board_a_sensor_manager_copy_map(&g_sensor_manager, &manager_map)) {
+    (void)board_a_runtime_publish_sensor_map(&g_runtime, &manager_map);
+    if (!board_a_runtime_request_sensor_map_save(
+            &g_runtime, (uint32_t)(now_us ^ (now_us >> 32U)))) {
+      board_a_sensor_manager_mark_map_dirty(&g_sensor_manager);
+    } else if (g_config_task != NULL) {
+      xTaskNotifyGive(g_config_task);
+    }
   }
 }
 
@@ -924,7 +910,7 @@ static void acquisition_task(void *argument)
 
     /*
      * A due sensor scan runs before the scheduler tick so a new record uses
-     * the latest complete DHT11 snapshot. The record period remains anchored
+     * the latest complete DS18B20 snapshot. The record period remains anchored
      * to the model's planned deadline; this bounded scan only affects the
      * actual completion time.
      */
@@ -952,8 +938,8 @@ static void acquisition_task(void *argument)
       wait_ms = BOARD_A_MAX_WAIT_MS;
     } else {
       uint64_t sensor_scan_us =
-          (status.data_source == BOARD_A_DATA_SOURCE_REAL_DHT11) ?
-          board_a_sensor_manager_next_scan_us(&g_sensor_manager) : 0U;
+          (status.data_source == BOARD_A_DATA_SOURCE_REAL_DS18B20) ?
+          board_a_sensor_manager_next_step_us(&g_sensor_manager) : 0U;
 
       if (status.schedule_start_late_us >
           g_board_a_rtos_diag.schedule_start_late_max_us) {
@@ -988,7 +974,7 @@ static void create_runtime_objects(void)
 
   board_a_runtime_init(&g_runtime, 1U, &g_runtime_ops, NULL);
   (void)board_a_runtime_set_data_source(
-      &g_runtime, BOARD_A_DATA_SOURCE_REAL_DHT11);
+      &g_runtime, BOARD_A_DATA_SOURCE_REAL_DS18B20);
 
   g_comm_task = xTaskCreateStatic(
       comm_task, "comm", BOARD_A_COMM_STACK_WORDS, NULL,
@@ -1018,7 +1004,7 @@ int board_a_rtos_run(void)
   debug_uart_puts("\r\n[board-a] Modbus RTU slave / FreeRTOS\r\n");
   debug_uart_puts("[board-a] addr=1 uart=USART2 PA2/PA3 PG8 9600 8E1\r\n");
   debug_uart_puts("[board-a] debug=USART1 PA9/PA10 115200 8N1\r\n");
-  debug_uart_puts("[board-a] dht11=PG9/PF6/PE5 2s serial scan\r\n");
+  debug_uart_puts("[board-a] ds18b20=PG9 shared 1-Wire, 1s scan\r\n");
 
   board_a_tx_init(&g_tx);
   board_a_rx_recovery_init(&g_rx_recovery, BOARD_A_T35_US);

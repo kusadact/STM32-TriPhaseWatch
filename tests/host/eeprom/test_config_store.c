@@ -327,8 +327,8 @@ static int test_business_payload_torn_write_preserves_old_slot(void)
   fake_backend_t backend;
   config_store_t store;
   config_store_metadata_t metadata;
-  board_a_persisted_config_t first = {10U, 0x0001U, 0U};
-  board_a_persisted_config_t second = {30U, 0x000FU, 5U};
+  board_a_persisted_config_t first = {10U, 0x0001U, 0U, 0U, {{0U}}};
+  board_a_persisted_config_t second = {30U, 0x000FU, 5U, 0U, {{0U}}};
   board_a_persisted_config_t decoded;
   uint8_t first_payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
   uint8_t second_payload[BOARD_A_CONFIG_PAYLOAD_SIZE];

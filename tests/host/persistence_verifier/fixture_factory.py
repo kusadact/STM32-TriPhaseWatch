@@ -111,11 +111,12 @@ def record_values(
     file_date: int,
     planned_ms: int | None = None,
     actual_ms: int | None = None,
+    schema: int = 2,
 ) -> dict[str, int]:
     planned = planned_ms if planned_ms is not None else 1_000_000 + ((seq - 1) * 10_000)
     actual = actual_ms if actual_ms is not None else planned + 5
     values = {
-        "schema": 2,
+        "schema": schema,
         "session": session,
         "seq": seq,
         "trigger": trigger,
@@ -134,6 +135,8 @@ def record_values(
     }
     for name in oracle.CSV_DHT11_COLUMNS:
         values[name] = 0
+    for name in oracle.CSV_DS18B20_COLUMNS:
+        values[name] = 0
     for index in range(4):
         enabled = bool(mask & (1 << index))
         values[f"v{index}"] = (
@@ -149,18 +152,24 @@ def csv_bytes(records: Iterable[Mapping[str, int]]) -> bytes:
     if not rows:
         return (oracle.CSV_HEADER + "\n").encode("ascii")
     schemas = [int(record["schema"]) for record in rows]
-    schema = next((value for value in schemas if value in (1, 2)), 2)
+    schema = next((value for value in schemas if value in (1, 2, 3)), 2)
     if schema == 1:
         columns = oracle.CSV_SCHEMA1_COLUMNS
     elif schema == 2:
         columns = oracle.CSV_COLUMNS
+    elif schema == 3:
+        columns = oracle.CSV_SCHEMA3_COLUMNS
     else:
         raise ValueError(f"unsupported CSV schema {schema}")
     encoded_rows = [
         ",".join(str(int(record[name])) for name in columns)
         for record in rows
     ]
-    header = oracle.CSV_SCHEMA1_HEADER if schema == 1 else oracle.CSV_HEADER
+    header = {
+        1: oracle.CSV_SCHEMA1_HEADER,
+        2: oracle.CSV_SCHEMA2_HEADER,
+        3: oracle.CSV_SCHEMA3_HEADER,
+    }[schema]
     return ("\n".join([header, *encoded_rows]) + "\n").encode("ascii")
 
 

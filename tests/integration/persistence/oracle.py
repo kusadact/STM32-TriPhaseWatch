@@ -58,9 +58,32 @@ CSV_DHT11_COLUMNS = (
     "dht1_sample_ms",
     "dht2_sample_ms",
 )
-CSV_COLUMNS = CSV_SCHEMA1_COLUMNS + CSV_DHT11_COLUMNS
+CSV_DS18B20_COLUMNS = (
+    "ds18b20_valid_mask",
+    "ds18b20_sample_id",
+    "ds18b20_0_temp_x16",
+    "ds18b20_1_temp_x16",
+    "ds18b20_2_temp_x16",
+    "ds18b20_0_quality",
+    "ds18b20_1_quality",
+    "ds18b20_2_quality",
+    "ds18b20_0_error",
+    "ds18b20_1_error",
+    "ds18b20_2_error",
+    "ds18b20_0_rom_short",
+    "ds18b20_1_rom_short",
+    "ds18b20_2_rom_short",
+    "ds18b20_0_sample_ms",
+    "ds18b20_1_sample_ms",
+    "ds18b20_2_sample_ms",
+)
+CSV_SCHEMA2_COLUMNS = CSV_SCHEMA1_COLUMNS + CSV_DHT11_COLUMNS
+CSV_SCHEMA3_COLUMNS = CSV_SCHEMA1_COLUMNS + CSV_DS18B20_COLUMNS
+CSV_COLUMNS = CSV_SCHEMA2_COLUMNS
 CSV_SCHEMA1_HEADER = ",".join(CSV_SCHEMA1_COLUMNS)
-CSV_HEADER = ",".join(CSV_COLUMNS)
+CSV_SCHEMA2_HEADER = ",".join(CSV_SCHEMA2_COLUMNS)
+CSV_SCHEMA3_HEADER = ",".join(CSV_SCHEMA3_COLUMNS)
+CSV_HEADER = CSV_SCHEMA2_HEADER
 
 U16_FIELDS = {
     "schema",
@@ -96,6 +119,16 @@ U16_FIELDS = {
     "dht0_error",
     "dht1_error",
     "dht2_error",
+    "ds18b20_valid_mask",
+    "ds18b20_0_quality",
+    "ds18b20_1_quality",
+    "ds18b20_2_quality",
+    "ds18b20_0_error",
+    "ds18b20_1_error",
+    "ds18b20_2_error",
+    "ds18b20_0_rom_short",
+    "ds18b20_1_rom_short",
+    "ds18b20_2_rom_short",
 }
 U32_FIELDS = {
     "session",
@@ -108,8 +141,17 @@ U32_FIELDS = {
     "dht0_sample_ms",
     "dht1_sample_ms",
     "dht2_sample_ms",
+    "ds18b20_sample_id",
+    "ds18b20_0_sample_ms",
+    "ds18b20_1_sample_ms",
+    "ds18b20_2_sample_ms",
 }
 U64_FIELDS = {"planned_ms", "actual_ms"}
+I16_FIELDS = {
+    "ds18b20_0_temp_x16",
+    "ds18b20_1_temp_x16",
+    "ds18b20_2_temp_x16",
+}
 
 MASK_CHANNELS = 0x000F
 PERIOD_MIN_SEC = 10
@@ -177,10 +219,32 @@ class CsvRecord:
     dht0_sample_ms: int = 0
     dht1_sample_ms: int = 0
     dht2_sample_ms: int = 0
+    ds18b20_valid_mask: int = 0
+    ds18b20_sample_id: int = 0
+    ds18b20_0_temp_x16: int = 0
+    ds18b20_1_temp_x16: int = 0
+    ds18b20_2_temp_x16: int = 0
+    ds18b20_0_quality: int = 0
+    ds18b20_1_quality: int = 0
+    ds18b20_2_quality: int = 0
+    ds18b20_0_error: int = 0
+    ds18b20_1_error: int = 0
+    ds18b20_2_error: int = 0
+    ds18b20_0_rom_short: int = 0
+    ds18b20_1_rom_short: int = 0
+    ds18b20_2_rom_short: int = 0
+    ds18b20_0_sample_ms: int = 0
+    ds18b20_1_sample_ms: int = 0
+    ds18b20_2_sample_ms: int = 0
 
     @property
     def values(self) -> tuple[int, ...]:
-        return tuple(getattr(self, name) for name in CSV_COLUMNS)
+        columns = {
+            1: CSV_SCHEMA1_COLUMNS,
+            2: CSV_SCHEMA2_COLUMNS,
+            3: CSV_SCHEMA3_COLUMNS,
+        }.get(self.schema, CSV_SCHEMA3_COLUMNS)
+        return tuple(getattr(self, name) for name in columns)
 
     @property
     def payload_key(self) -> tuple[Any, ...]:
@@ -226,6 +290,23 @@ class CsvRecord:
             self.dht0_sample_ms,
             self.dht1_sample_ms,
             self.dht2_sample_ms,
+            self.ds18b20_valid_mask,
+            self.ds18b20_sample_id,
+            self.ds18b20_0_temp_x16,
+            self.ds18b20_1_temp_x16,
+            self.ds18b20_2_temp_x16,
+            self.ds18b20_0_quality,
+            self.ds18b20_1_quality,
+            self.ds18b20_2_quality,
+            self.ds18b20_0_error,
+            self.ds18b20_1_error,
+            self.ds18b20_2_error,
+            self.ds18b20_0_rom_short,
+            self.ds18b20_1_rom_short,
+            self.ds18b20_2_rom_short,
+            self.ds18b20_0_sample_ms,
+            self.ds18b20_1_sample_ms,
+            self.ds18b20_2_sample_ms,
         )
 
 
@@ -240,6 +321,17 @@ class ParsedCsv:
 
 def is_ascii_decimal(value: bytes) -> bool:
     return bool(value) and all(0x30 <= byte <= 0x39 for byte in value)
+
+
+def is_ascii_signed_decimal(value: bytes) -> bool:
+    return bool(value) and (
+        (value[0] != ord("-") and is_ascii_decimal(value))
+        or (
+            value[0] == ord("-")
+            and len(value) > 1
+            and is_ascii_decimal(value[1:])
+        )
+    )
 
 
 def _parse_unsigned(
@@ -277,6 +369,29 @@ def _parse_unsigned(
     return value
 
 
+def _parse_signed(
+    raw: bytes,
+    field: str,
+    *,
+    line_number: int,
+    offset: int,
+) -> int:
+    if not is_ascii_signed_decimal(raw):
+        raise CsvContractError(
+            "non_decimal_field",
+            f"line {line_number} field {field!r} is not signed decimal",
+            offset=offset,
+        )
+    value = int(raw)
+    if field in I16_FIELDS and not -0x8000 <= value <= 0x7FFF:
+        raise CsvContractError(
+            "field_width",
+            f"line {line_number} field {field!r} exceeds i16",
+            offset=offset,
+        )
+    return value
+
+
 def parse_csv_bytes(
     data: bytes,
     relative_path: str,
@@ -306,22 +421,25 @@ def parse_csv_bytes(
     if not lines:
         raise CsvContractError("empty_file", "CSV file is empty")
     schema1_header = CSV_SCHEMA1_HEADER.encode("ascii")
-    schema2_header = CSV_HEADER.encode("ascii")
+    schema2_header = CSV_SCHEMA2_HEADER.encode("ascii")
+    schema3_header = CSV_SCHEMA3_HEADER.encode("ascii")
     if lines[0] == schema1_header:
         columns = CSV_SCHEMA1_COLUMNS
     elif lines[0] == schema2_header:
-        columns = CSV_COLUMNS
+        columns = CSV_SCHEMA2_COLUMNS
+    elif lines[0] == schema3_header:
+        columns = CSV_SCHEMA3_COLUMNS
     else:
         raise CsvContractError(
             "header_mismatch",
-            "CSV header does not match schema 1 or schema 2 exactly",
+            "CSV header does not match schema 1, 2, or 3 exactly",
             offset=0,
         )
 
     records: list[CsvRecord] = []
     byte_offset = len(lines[0]) + 1
     for line_number, line in enumerate(lines[1:], start=2):
-        if line in (schema1_header, schema2_header):
+        if line in (schema1_header, schema2_header, schema3_header):
             raise CsvContractError(
                 "duplicate_header",
                 f"duplicate header at line {line_number}",
@@ -340,12 +458,20 @@ def parse_csv_bytes(
         values: dict[str, int] = {}
         local_offset = byte_offset
         for field, raw in zip(columns, fields):
-            values[field] = _parse_unsigned(
-                raw,
-                field,
-                line_number=line_number,
-                offset=local_offset,
-            )
+            if field in I16_FIELDS:
+                values[field] = _parse_signed(
+                    raw,
+                    field,
+                    line_number=line_number,
+                    offset=local_offset,
+                )
+            else:
+                values[field] = _parse_unsigned(
+                    raw,
+                    field,
+                    line_number=line_number,
+                    offset=local_offset,
+                )
             local_offset += len(raw) + 1
         records.append(CsvRecord(**values))
         byte_offset += len(line) + 1
@@ -458,14 +584,23 @@ def validate_record_contract(
     def issue(code: str, message: str) -> None:
         issues.append({"code": code, "message": message})
 
-    if record.schema not in (1, 2):
-        issue("schema", f"schema={record.schema}, expected 1 or 2")
+    if record.schema not in (1, 2, 3):
+        issue("schema", f"schema={record.schema}, expected 1, 2, or 3")
     if record.reserved != 0:
         issue("reserved", f"reserved={record.reserved}, expected 0")
     if record.trigger not in (1, 2):
         issue("trigger", f"trigger={record.trigger}, expected 1 or 2")
-    if record.source not in (1, 2):
-        issue("source", f"source={record.source}, expected TEST=1 or REAL_DHT11=2")
+    if record.source not in (1, 2, 3):
+        issue(
+            "source",
+            f"source={record.source}, expected TEST=1, REAL_DHT11=2, or REAL_DS18B20=3",
+        )
+    if record.schema == 1 and record.source != 1:
+        issue("schema_source", "CSV schema 1 requires TEST source")
+    if record.schema == 2 and record.source not in (1, 2):
+        issue("schema_source", "CSV schema 2 requires TEST or REAL_DHT11 source")
+    if record.schema == 3 and record.source not in (1, 3):
+        issue("schema_source", "CSV schema 3 requires TEST or REAL_DS18B20 source")
     if record.actual_ms < record.planned_ms:
         issue(
             "timestamp_order",
@@ -603,7 +738,32 @@ def validate_record_contract(
             )
         ):
             issue("test_dht11_fields", "TEST source must leave DHT11 fields at zero")
-    else:
+        if any(
+            (
+                record.ds18b20_valid_mask,
+                record.ds18b20_sample_id,
+                record.ds18b20_0_temp_x16,
+                record.ds18b20_1_temp_x16,
+                record.ds18b20_2_temp_x16,
+                record.ds18b20_0_quality,
+                record.ds18b20_1_quality,
+                record.ds18b20_2_quality,
+                record.ds18b20_0_error,
+                record.ds18b20_1_error,
+                record.ds18b20_2_error,
+                record.ds18b20_0_rom_short,
+                record.ds18b20_1_rom_short,
+                record.ds18b20_2_rom_short,
+                record.ds18b20_0_sample_ms,
+                record.ds18b20_1_sample_ms,
+                record.ds18b20_2_sample_ms,
+            )
+        ):
+            issue(
+                "test_ds18b20_fields",
+                "TEST source must leave DS18B20 fields at zero",
+            )
+    elif record.source == 2:
         if record.schema != 2:
             issue("dht11_schema", "REAL_DHT11 requires CSV schema 2")
         if record.dht_sample_id == 0:
@@ -686,6 +846,84 @@ def validate_record_contract(
                     (
                         f"DHT11-{index} quality={quality} has incompatible "
                         f"error={dht_errors[index]}"
+                    ),
+                )
+    else:
+        if record.schema != 3:
+            issue("ds18b20_schema", "REAL_DS18B20 requires CSV schema 3")
+        if record.ds18b20_sample_id == 0:
+            issue(
+                "ds18b20_sample_id",
+                "REAL_DS18B20 requires a non-zero sample id",
+            )
+        if record.ds18b20_valid_mask & ~0x0007:
+            issue(
+                "ds18b20_valid_mask",
+                f"invalid DS18B20 valid mask {record.ds18b20_valid_mask}",
+            )
+        for index in range(4):
+            if (
+                units[index] != 2
+                or values[index] != 0
+                or qualities[index] != 0
+            ):
+                issue(
+                    "real_legacy_channel",
+                    (
+                        f"REAL_DS18B20 requires zero legacy channel {index}, "
+                        "unit=2 and quality=0"
+                    ),
+                )
+        temperatures = (
+            record.ds18b20_0_temp_x16,
+            record.ds18b20_1_temp_x16,
+            record.ds18b20_2_temp_x16,
+        )
+        ds_qualities = (
+            record.ds18b20_0_quality,
+            record.ds18b20_1_quality,
+            record.ds18b20_2_quality,
+        )
+        ds_errors = (
+            record.ds18b20_0_error,
+            record.ds18b20_1_error,
+            record.ds18b20_2_error,
+        )
+        expected_errors = {
+            1: {0},
+            2: {1, 2},
+            3: {3, 6},
+            4: {7},
+            5: {1, 2, 3, 4, 5, 6, 7, 255},
+            6: {0, 1, 2, 3, 4, 5, 6, 7, 255},
+        }
+        for index, quality in enumerate(ds_qualities):
+            expected_valid = quality in (1, 5)
+            if bool(record.ds18b20_valid_mask & (1 << index)) != expected_valid:
+                issue(
+                    "ds18b20_valid_mask",
+                    (
+                        f"DS18B20-{index} quality={quality} does not match "
+                        "valid mask bit"
+                    ),
+                )
+            if quality not in expected_errors:
+                issue(
+                    "ds18b20_quality",
+                    f"DS18B20-{index} has invalid quality={quality}",
+                )
+                continue
+            if not expected_valid and temperatures[index] != 0:
+                issue(
+                    "ds18b20_invalid_value",
+                    f"DS18B20-{index} reports a temperature without a valid sample",
+                )
+            if ds_errors[index] not in expected_errors[quality]:
+                issue(
+                    "ds18b20_error_mismatch",
+                    (
+                        f"DS18B20-{index} quality={quality} has incompatible "
+                        f"error={ds_errors[index]}"
                     ),
                 )
     return issues

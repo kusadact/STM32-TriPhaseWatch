@@ -52,6 +52,15 @@ void board_a_runtime_publish_sensor_snapshot(
     board_a_runtime_t *runtime,
     const board_a_sensor_snapshot_t *snapshot);
 
+bool board_a_runtime_publish_sensor_map(
+    board_a_runtime_t *runtime, const board_a_sensor_map_t *map);
+
+bool board_a_runtime_copy_sensor_map(
+    board_a_runtime_t *runtime, board_a_sensor_map_t *map);
+
+bool board_a_runtime_request_sensor_map_save(
+    board_a_runtime_t *runtime, uint32_t command_id);
+
 /* Only the single CommTask/test owner may call this function. */
 void board_a_runtime_push_byte(board_a_runtime_t *runtime,
                                uint8_t byte,

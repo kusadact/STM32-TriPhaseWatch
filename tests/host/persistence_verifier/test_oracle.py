@@ -149,6 +149,68 @@ class OracleTests(unittest.TestCase):
         }
         self.assertIn("dht11_stale_error", codes)
 
+    def test_schema3_real_ds18b20_record_is_validated(self) -> None:
+        values = record_values(
+            seq=1,
+            session=1,
+            trigger=1,
+            period_s=10,
+            mask=1,
+            sample_count=0,
+            config_version=1,
+            utc_valid=0,
+            utc_s=0,
+            file_id=1,
+            file_date=0,
+            schema=3,
+        )
+        values["source"] = 3
+        for index in range(4):
+            values[f"v{index}"] = 0
+            values[f"u{index}"] = 2
+            values[f"q{index}"] = 0
+        values.update(
+            {
+                "ds18b20_valid_mask": 7,
+                "ds18b20_sample_id": 99,
+                "ds18b20_0_temp_x16": 230,
+                "ds18b20_1_temp_x16": -160,
+                "ds18b20_2_temp_x16": 0,
+                "ds18b20_0_quality": 1,
+                "ds18b20_1_quality": 5,
+                "ds18b20_2_quality": 1,
+                "ds18b20_0_error": 0,
+                "ds18b20_1_error": 6,
+                "ds18b20_2_error": 0,
+                "ds18b20_0_rom_short": 0x1200,
+                "ds18b20_1_rom_short": 0x1201,
+                "ds18b20_2_rom_short": 0x1202,
+                "ds18b20_0_sample_ms": 1000,
+                "ds18b20_1_sample_ms": 2000,
+                "ds18b20_2_sample_ms": 3000,
+            }
+        )
+
+        record = oracle.CsvRecord(**values)
+        self.assertEqual(
+            oracle.validate_record_contract(
+                record,
+                config_versions={1: {"period_s": 10, "mask": 1, "sample_count": 0}},
+            ),
+            [],
+        )
+
+        values["ds18b20_1_error"] = 0
+        invalid = oracle.CsvRecord(**values)
+        codes = {
+            issue["code"]
+            for issue in oracle.validate_record_contract(
+                invalid,
+                config_versions=None,
+            )
+        }
+        self.assertIn("ds18b20_error_mismatch", codes)
+
 
 if __name__ == "__main__":
     unittest.main()

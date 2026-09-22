@@ -406,7 +406,7 @@ class VerifierTests(unittest.TestCase):
 
         def unknown_schema(run_dir: Path, files_dir: Path) -> None:
             def mutate(records: list[dict[str, int]]) -> list[dict[str, int]]:
-                records[1]["schema"] = 3
+                records[1]["schema"] = 4
                 return records
 
             _mutate_records(run_dir, files_dir, mutate)

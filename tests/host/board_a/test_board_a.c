@@ -372,7 +372,7 @@ static void test_single_dedup_window(void)
         BOARD_A_COMMAND_RESULT_DUPLICATE);
 }
 
-static void test_dht11_snapshot_modbus_block(void)
+static void test_ds18b20_snapshot_modbus_block(void)
 {
   board_a_slave_t slave;
   board_a_sensor_snapshot_t sensors;
@@ -386,18 +386,17 @@ static void test_dht11_snapshot_modbus_block(void)
   sensors.valid_mask = 0x0007U;
   for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
     sensors.sensors[index].sensor_id = index;
-    sensors.sensors[index].sensor_type = BOARD_A_SENSOR_TYPE_DHT11;
+    sensors.sensors[index].sensor_type = BOARD_A_SENSOR_TYPE_DS18B20;
     sensors.sensors[index].has_value = true;
-    sensors.sensors[index].temperature_x10 =
-        (uint16_t)(200U + index);
-    sensors.sensors[index].humidity_x10 =
-        (uint16_t)(400U + index);
+    sensors.sensors[index].temperature_x16 =
+        (index == 1U) ? -160 : (int16_t)(250U + (index * 10U));
     sensors.sensors[index].quality = BOARD_A_QUALITY_OK;
     sensors.sensors[index].error = BOARD_A_SENSOR_ERROR_NONE;
+    sensors.sensors[index].rom_short = (uint16_t)(0x1200U + index);
     sensors.sensors[index].sample_time_ms = 1000U + index;
   }
   CHECK(board_a_model_set_data_source(
-      &slave.model, BOARD_A_DATA_SOURCE_REAL_DHT11));
+      &slave.model, BOARD_A_DATA_SOURCE_REAL_DS18B20));
   board_a_model_publish_sensor_snapshot(&slave.model, &sensors);
   CHECK(write_multiple(&slave, BOARD_A_HOLDING_CFG_PERIOD_SEC, config, 3U));
   CHECK(command(&slave, BOARD_A_COMMAND_APPLY_CONFIG));
@@ -405,24 +404,24 @@ static void test_dht11_snapshot_modbus_block(void)
   board_a_slave_tick(&slave, 1000000U);
 
   CHECK(read_registers(&slave, 0x04U,
-                       BOARD_A_INPUT_DHT11_CONTRACT_REVISION,
+                       BOARD_A_INPUT_DS18B20_CONTRACT_REVISION,
                        (uint16_t)(sizeof(values) / sizeof(values[0])),
                        values));
-  CHECK(values[0] == 1U);
-  CHECK(values[1] == BOARD_A_DATA_SOURCE_REAL_DHT11);
+  CHECK(values[0] == 2U);
+  CHECK(values[1] == BOARD_A_DATA_SOURCE_REAL_DS18B20);
   CHECK(values[2] == 0x0007U);
   CHECK(((uint32_t)values[3] << 16U | values[4]) == 42U);
-  CHECK(values[5] == 200U);
-  CHECK(values[6] == 201U);
-  CHECK(values[7] == 202U);
-  CHECK(values[8] == 400U);
-  CHECK(values[9] == 401U);
-  CHECK(values[10] == 402U);
-  CHECK(values[11] == BOARD_A_QUALITY_OK);
-  CHECK(values[13] == BOARD_A_QUALITY_OK);
-  CHECK(((uint32_t)values[17] << 16U | values[18]) == 1000U);
-  CHECK(((uint32_t)values[21] << 16U | values[22]) == 1002U);
-  CHECK(values[23] == BOARD_A_SENSOR_TYPE_DHT11);
+  CHECK(values[5] == 250U);
+  CHECK(values[6] == (uint16_t)-160);
+  CHECK(values[7] == 270U);
+  CHECK(values[8] == BOARD_A_QUALITY_OK);
+  CHECK(values[10] == BOARD_A_QUALITY_OK);
+  CHECK(values[11] == BOARD_A_SENSOR_ERROR_NONE);
+  CHECK(((uint32_t)values[14] << 16U | values[15]) == 1000U);
+  CHECK(((uint32_t)values[18] << 16U | values[19]) == 1002U);
+  CHECK(values[20] == BOARD_A_SENSOR_TYPE_DS18B20);
+  CHECK(values[21] == 0x1200U);
+  CHECK(values[23] == 0x1202U);
 }
 
 static void test_write_single_and_multiple(void)
@@ -884,7 +883,7 @@ int main(void)
   test_normal_reads();
   test_single_write_and_snapshot();
   test_single_dedup_window();
-  test_dht11_snapshot_modbus_block();
+  test_ds18b20_snapshot_modbus_block();
   test_write_single_and_multiple();
   test_exception_responses();
   test_length_and_byte_count_errors();
