@@ -9,6 +9,7 @@ from .client import ModbusClient, TransactionResult
 from .errors import (
     ModbusClientError,
     ModbusException,
+    ProtocolError,
     StateError,
     UnsupportedProtocolError,
 )
@@ -142,8 +143,27 @@ class ModbusService:
                 sensor_type_code=decoded["sensor_type_code"],
             )
 
+        valid_mask = decoded["valid_mask"]
+        if source_code == DS18B20_SOURCE_NONE and valid_mask != 0:
+            raise ProtocolError(
+                "DS18B20 块声明 source=NONE 却带非零有效位",
+                source_type=source_code,
+                valid_mask=valid_mask,
+            )
+        for sensor in decoded["sensors"]:
+            has_value = bool(valid_mask & (1 << sensor["sensor_id"]))
+            quality_with_value = sensor["quality"] in DS18B20_QUALITIES_WITH_VALUE
+            if has_value != quality_with_value:
+                raise ProtocolError(
+                    "DS18B20 块的有效位与质量码不一致",
+                    sensor_id=sensor["sensor_id"],
+                    quality=sensor["quality"],
+                    quality_code=sensor["quality_code"],
+                    valid_mask=valid_mask,
+                )
+
         no_sample = (
-            source_code == DS18B20_SOURCE_NONE and decoded["valid_mask"] == 0
+            source_code == DS18B20_SOURCE_NONE and valid_mask == 0
         )
         sensors = []
         for sensor in decoded["sensors"]:

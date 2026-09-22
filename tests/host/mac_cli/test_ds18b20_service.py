@@ -5,7 +5,11 @@ import unittest
 
 from tools.modbus_client import registers
 from tools.modbus_client.client import ModbusClient
-from tools.modbus_client.errors import ModbusException, UnsupportedProtocolError
+from tools.modbus_client.errors import (
+    ModbusException,
+    ProtocolError,
+    UnsupportedProtocolError,
+)
 from tools.modbus_client.protocol import FUNCTION_READ_INPUT, append_crc
 from tools.modbus_client.service import (
     INPUT_DS18B20_COUNT,
@@ -74,6 +78,8 @@ class Ds18b20ServiceTests(unittest.TestCase):
     def test_maps_three_sensors_and_32_bit_fields(self) -> None:
         values = ds18b20_values(
             sample_id=0x12345678,
+            # a CRC_ERROR point keeps no valid bit
+            valid_mask=0x0003,
             temperatures=(230, -160, 480),
             qualities=(1, 5, 3),
             errors=(0, 6, 3),
@@ -92,7 +98,7 @@ class Ds18b20ServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["sensor_type_code"], 2)
         self.assertEqual(snapshot["sample_id"], 0x12345678)
         self.assertEqual(snapshot["source"], "REAL_DS18B20")
-        self.assertEqual(snapshot["valid_mask"], 0x0007)
+        self.assertEqual(snapshot["valid_mask"], 0x0003)
         self.assertEqual(len(snapshot["sensors"]), 3)
         self.assertEqual(snapshot["sensors"][0]["temperature_x16"], 230)
         self.assertEqual(snapshot["sensors"][1]["temperature_x16"], -160)
@@ -294,6 +300,48 @@ class Ds18b20ServiceTests(unittest.TestCase):
             (1, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         )
         self.assertEqual(decoded["source"], "REAL_DHT11")
+
+    def test_source_none_with_valid_mask_is_rejected(self) -> None:
+        values = ds18b20_values(source=0, valid_mask=0x0007)
+        service, client, _transport = self._service(
+            lambda request: read_response(request, values)
+        )
+        try:
+            with self.assertRaises(ProtocolError) as raised:
+                service.read_temperature_snapshot()
+        finally:
+            client.close()
+
+        self.assertEqual(raised.exception.details["source_type"], 0)
+        self.assertEqual(raised.exception.details["valid_mask"], 0x0007)
+
+    def test_valid_mask_set_without_value_quality_is_rejected(self) -> None:
+        values = ds18b20_values(valid_mask=0x0001, qualities=(6, 6, 6))
+        service, client, _transport = self._service(
+            lambda request: read_response(request, values)
+        )
+        try:
+            with self.assertRaises(ProtocolError) as raised:
+                service.read_temperature_snapshot()
+        finally:
+            client.close()
+
+        self.assertEqual(raised.exception.details["sensor_id"], 0)
+        self.assertEqual(raised.exception.details["quality"], "NOT_PRESENT")
+
+    def test_ok_quality_without_valid_mask_bit_is_rejected(self) -> None:
+        values = ds18b20_values(valid_mask=0x0006, qualities=(1, 1, 1))
+        service, client, _transport = self._service(
+            lambda request: read_response(request, values)
+        )
+        try:
+            with self.assertRaises(ProtocolError) as raised:
+                service.read_temperature_snapshot()
+        finally:
+            client.close()
+
+        self.assertEqual(raised.exception.details["sensor_id"], 0)
+        self.assertEqual(raised.exception.details["valid_mask"], 0x0006)
 
 
 if __name__ == "__main__":
