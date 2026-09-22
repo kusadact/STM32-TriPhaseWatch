@@ -15,7 +15,7 @@ from fixture_factory import (
     rewrite_csv,
 )
 from persistence import oracle
-from persistence.manifest import write_json_atomic
+from persistence.manifest import identity_sha256, write_json_atomic
 from persistence.verify import verify_run
 
 
@@ -406,7 +406,7 @@ class VerifierTests(unittest.TestCase):
 
         def unknown_schema(run_dir: Path, files_dir: Path) -> None:
             def mutate(records: list[dict[str, int]]) -> list[dict[str, int]]:
-                records[1]["schema"] = 2
+                records[1]["schema"] = 4
                 return records
 
             _mutate_records(run_dir, files_dir, mutate)
@@ -466,6 +466,14 @@ class VerifierTests(unittest.TestCase):
                 ),
             )
 
+        def schema_identity_mismatch(run_dir: Path, files_dir: Path) -> None:
+            def mutate(manifest: dict) -> None:
+                identity = manifest["identity"]
+                identity["contract"]["csv_schema"] = 1
+                manifest["identity_sha256"] = identity_sha256(identity)
+
+            _mutate_manifest(run_dir, mutate)
+
         cases.extend(
             [
                 ("delete_middle", 1, {"generated_file_count", "sequence_order"}, delete_middle),
@@ -493,6 +501,12 @@ class VerifierTests(unittest.TestCase):
                 ("truncated_tail", 1, {"truncated_tail"}, truncated_tail),
                 ("wrong_column_count", 1, {"column_count"}, wrong_column_count),
                 ("unknown_schema", 1, {"schema"}, unknown_schema),
+                (
+                    "schema_identity_mismatch",
+                    1,
+                    {"csv_schema_identity"},
+                    schema_identity_mismatch,
+                ),
                 ("missing_file", 1, {"file_missing"}, missing_file),
                 ("hash_change", 1, {"file_hash"}, hash_change),
                 (

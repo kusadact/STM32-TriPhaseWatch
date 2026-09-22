@@ -39,6 +39,34 @@ QUALITY_NAMES = {
     1: "TEST_VALID",
 }
 
+DATA_SOURCE_NAMES = {
+    0: "NONE",
+    1: "TEST",
+    2: "REAL_DHT11",
+    3: "REAL_DS18B20",
+}
+
+DS18B20_QUALITY_NAMES = {
+    1: "OK",
+    2: "TIMEOUT",
+    3: "CRC_ERROR",
+    4: "RANGE_ERROR",
+    5: "STALE",
+    6: "NOT_PRESENT",
+}
+
+DS18B20_ERROR_NAMES = {
+    0: "NONE",
+    1: "RESET_TIMEOUT",
+    2: "BUS_STUCK_LOW",
+    3: "ROM_CRC",
+    4: "ROM_FAMILY",
+    5: "SEARCH",
+    6: "SCRATCHPAD_CRC",
+    7: "RANGE",
+    255: "DRIVER",
+}
+
 SAVE_STATE_NAMES = {
     0: "IDLE",
     1: "PENDING",
@@ -117,6 +145,10 @@ def _word32(high: int, low: int) -> int:
     return (high << 16) | low
 
 
+def _i16(value: int) -> int:
+    return value - 0x10000 if value & 0x8000 else value
+
+
 def _require_length(values: Sequence[int], expected: int, name: str) -> None:
     if len(values) != expected:
         raise ValueError(f"{name} requires {expected} registers")
@@ -189,13 +221,62 @@ def decode_snapshot(values: Sequence[int]) -> dict[str, Any]:
         "valid": bool(values[0]),
         "sequence": _word32(values[1], values[2]),
         "source_type": values[3],
-        "source": "TEST" if values[3] == 1 else f"UNKNOWN({values[3]})",
+        "source": DATA_SOURCE_NAMES.get(
+            values[3],
+            f"UNKNOWN({values[3]})",
+        ),
         "channel_count": values[4],
         "channels": channels,
         "trigger_code": trigger,
         "trigger": TRIGGER_NAMES.get(trigger, f"UNKNOWN({trigger})"),
         "unit_code": values[14],
         "unit": "count" if values[14] == 1 else f"UNKNOWN({values[14]})",
+    }
+
+
+def decode_ds18b20_snapshot(values: Sequence[int]) -> dict[str, Any]:
+    """Decode the 24-register DS18B20 extension block at input 0x00B0."""
+
+    _require_length(values, 24, "DS18B20 snapshot")
+    source = values[1]
+    valid_mask = values[2]
+    sensors = []
+    for index in range(3):
+        quality = values[8 + index]
+        error = values[11 + index]
+        sample_time_offset = 14 + (index * 2)
+        sensors.append(
+            {
+                "sensor_id": index,
+                "sensor_type": "DS18B20",
+                "valid": bool(valid_mask & (1 << index)),
+                "temperature_x16": _i16(values[5 + index]),
+                "temperature_unit": "1/16degC",
+                "quality_code": quality,
+                "quality": DS18B20_QUALITY_NAMES.get(
+                    quality,
+                    f"UNKNOWN({quality})",
+                ),
+                "error_code": error,
+                "error": DS18B20_ERROR_NAMES.get(
+                    error,
+                    f"UNKNOWN({error})",
+                ),
+                "sample_time_ms": _word32(
+                    values[sample_time_offset],
+                    values[sample_time_offset + 1],
+                ),
+                "rom_short": values[21 + index],
+            }
+        )
+    return {
+        "contract_revision": values[0],
+        "source_type": source,
+        "source": DATA_SOURCE_NAMES.get(source, f"UNKNOWN({source})"),
+        "valid_mask": valid_mask,
+        "sample_id": _word32(values[3], values[4]),
+        "sensors": sensors,
+        "sensor_type_code": values[20],
     }
 
 

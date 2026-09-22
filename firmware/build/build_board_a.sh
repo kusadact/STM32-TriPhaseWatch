@@ -77,6 +77,8 @@ sources=(
   "$CORE_DIR/board_a_record_format.c"
   "$CORE_DIR/board_a_storage_engine.c"
   "$CORE_DIR/board_a_slave.c"
+  "$BOARD_DIR/sensors/ds18b20.c"
+  "$BOARD_DIR/sensors/sensor_manager.c"
   "$PLATFORM_DIR/board_a_main.c"
   "$PLATFORM_DIR/board_a_rtos.c"
   "$PLATFORM_DIR/board_a_persistence_tasks.c"

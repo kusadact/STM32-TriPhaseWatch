@@ -4,17 +4,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define BOARD_A_CONFIG_PAYLOAD_SCHEMA 1U
-#define BOARD_A_CONFIG_PAYLOAD_SIZE 12U
-#define BOARD_A_RECORD_SCHEMA 1U
+#define BOARD_A_CONFIG_PAYLOAD_SCHEMA 2U
+#define BOARD_A_CONFIG_PAYLOAD_SCHEMA1_SIZE 12U
+#define BOARD_A_CONFIG_PAYLOAD_SIZE 36U
+#define BOARD_A_RECORD_SCHEMA 3U
 #define BOARD_A_RECORD_CHANNEL_COUNT 4U
-#define BOARD_A_RECORD_CSV_MAX_BYTES 384U
+#define BOARD_A_RECORD_DS18B20_COUNT 3U
+#define BOARD_A_RECORD_CSV_MAX_BYTES 512U
 #define BOARD_A_RECORD_PATH_MAX_BYTES 32U
 
 typedef struct {
   uint16_t period_sec;
   uint16_t channel_mask;
   uint16_t record_count;
+  uint8_t sensor_valid_mask;
+  uint8_t sensor_roms[BOARD_A_RECORD_DS18B20_COUNT][8];
 } board_a_persisted_config_t;
 
 typedef struct {
@@ -33,6 +37,13 @@ typedef struct {
   uint16_t values[BOARD_A_RECORD_CHANNEL_COUNT];
   uint16_t units[BOARD_A_RECORD_CHANNEL_COUNT];
   uint16_t qualities[BOARD_A_RECORD_CHANNEL_COUNT];
+  uint16_t ds18b20_valid_mask;
+  uint32_t ds18b20_sample_id;
+  int16_t ds18b20_temperature_x16[BOARD_A_RECORD_DS18B20_COUNT];
+  uint16_t ds18b20_quality[BOARD_A_RECORD_DS18B20_COUNT];
+  uint16_t ds18b20_error[BOARD_A_RECORD_DS18B20_COUNT];
+  uint16_t ds18b20_rom_short[BOARD_A_RECORD_DS18B20_COUNT];
+  uint32_t ds18b20_sample_time_ms[BOARD_A_RECORD_DS18B20_COUNT];
   uint32_t file_id;
   uint32_t file_date;
 } board_a_record_format_record_t;

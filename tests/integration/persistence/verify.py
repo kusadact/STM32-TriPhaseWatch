@@ -670,6 +670,44 @@ def _verify_records(
     return all_records
 
 
+def _verify_csv_schema_contract(
+    report: Report,
+    manifest: Mapping[str, Any],
+    parsed_files: Sequence[oracle.ParsedCsv],
+) -> None:
+    identity = manifest.get("identity")
+    if not isinstance(identity, Mapping):
+        return
+    contract = identity.get("contract")
+    if not isinstance(contract, Mapping):
+        return
+    expected = contract.get("csv_schema")
+    if expected not in (1, 2):
+        return
+    actual = {
+        record.schema
+        for parsed in parsed_files
+        for record in parsed.records
+    }
+    if not actual:
+        report.check("csv_schema", "NOT_RUN", "no parsed CSV records")
+    elif actual == {expected}:
+        report.check(
+            "csv_schema",
+            "PASS",
+            f"CSV rows use identity schema {expected}",
+        )
+    else:
+        report.add_issue(
+            "csv_schema_identity",
+            (
+                f"identity csv_schema={expected} but parsed rows use "
+                f"{sorted(actual)}"
+            ),
+        )
+        report.check("csv_schema", "FAIL", "CSV schema differs from identity")
+
+
 def _verify_timeline(
     report: Report,
     parsed_files: Sequence[oracle.ParsedCsv],
@@ -1154,6 +1192,7 @@ def verify_run(run_dir: Path, files_dir: Path, output_dir: Path) -> Report:
         return report
 
     _, parsed_files = _verify_file_manifest(report, files_dir, entries)
+    _verify_csv_schema_contract(report, manifest, parsed_files)
     config_versions = _config_versions_from_observations(
         report,
         evidence["observations"],
@@ -1187,7 +1226,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Read a completed P5 run directory and copied LOG CSV files, "
-            "then independently verify schema 1, payloads, counters, and hashes."
+            "then independently verify schema 1/2/3, payloads, counters, and hashes."
         )
     )
     parser.add_argument(

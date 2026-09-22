@@ -1,5 +1,7 @@
 #include "board_a_runtime.h"
 
+#include <string.h>
+
 static bool runtime_lock(board_a_runtime_t *runtime)
 {
   if ((runtime->ops == NULL) || (runtime->ops->lock == NULL)) {
@@ -23,6 +25,83 @@ void board_a_runtime_init(board_a_runtime_t *runtime,
   board_a_slave_init(&runtime->slave, session_id);
   runtime->ops = ops;
   runtime->context = context;
+}
+
+bool board_a_runtime_set_data_source(board_a_runtime_t *runtime,
+                                     uint16_t source)
+{
+  bool updated = false;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  updated = board_a_model_set_data_source(&runtime->slave.model, source);
+  runtime_unlock(runtime);
+  return updated;
+}
+
+void board_a_runtime_publish_sensor_snapshot(
+    board_a_runtime_t *runtime,
+    const board_a_sensor_snapshot_t *snapshot)
+{
+  if ((snapshot == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_publish_sensor_snapshot(&runtime->slave.model, snapshot);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_publish_sensor_map(
+    board_a_runtime_t *runtime, const board_a_sensor_map_t *map)
+{
+  bool updated;
+
+  if ((map == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  updated = board_a_model_publish_sensor_map(&runtime->slave.model, map);
+  runtime_unlock(runtime);
+  return updated;
+}
+
+bool board_a_runtime_copy_sensor_map(
+    board_a_runtime_t *runtime, board_a_sensor_map_t *map)
+{
+  bool copied;
+
+  if ((map == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_sensor_map(&runtime->slave.model, map);
+  runtime_unlock(runtime);
+  return copied;
+}
+
+bool board_a_runtime_request_sensor_map_save(
+    board_a_runtime_t *runtime, uint32_t command_id)
+{
+  board_a_model_t *model;
+  board_a_persisted_config_t config;
+  board_a_save_accept_result_t result;
+  uint8_t index;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  model = &runtime->slave.model;
+  memset(&config, 0, sizeof(config));
+  config.period_sec = model->active_config.config.period_sec;
+  config.channel_mask = model->active_config.config.channel_mask;
+  config.record_count = model->active_config.config.record_count;
+  config.sensor_valid_mask = model->sensor_map.valid_mask;
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    memcpy(config.sensor_roms[index], model->sensor_map.bindings[index].rom,
+           DS18B20_ROM_SIZE);
+  }
+  result = board_a_persistence_accept_save(
+      &model->persistence, &config, model->active_config.version, command_id);
+  runtime_unlock(runtime);
+  return result == BOARD_A_SAVE_ACCEPT_OK;
 }
 
 void board_a_runtime_push_byte(board_a_runtime_t *runtime,
@@ -108,6 +187,7 @@ bool board_a_runtime_copy_status(board_a_runtime_t *runtime,
   }
 
   status->run_state = (uint16_t)runtime->slave.model.run_state;
+  status->data_source = runtime->slave.model.data_source;
   status->last_command = runtime->slave.model.last_command;
   status->command_result = runtime->slave.model.command_result;
   status->last_command_id = runtime->slave.model.last_command_id;

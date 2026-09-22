@@ -14,7 +14,7 @@ from persistence.manifest import (
 
 class ManifestTests(unittest.TestCase):
     def test_valid_identity_passes(self) -> None:
-        self.assertEqual(validate_identity(valid_identity())["contract"]["csv_schema"], 1)
+        self.assertEqual(validate_identity(valid_identity())["contract"]["csv_schema"], 2)
 
     def test_missing_candidate_identity_is_rejected(self) -> None:
         identity = valid_identity()

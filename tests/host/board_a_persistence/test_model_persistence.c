@@ -95,7 +95,7 @@ static int test_save_failure_and_startup_load(void)
 {
   board_a_model_t model;
   board_a_save_request_t request;
-  board_a_persisted_config_t loaded = {45U, 9U, 12U};
+  board_a_persisted_config_t loaded = {45U, 9U, 12U, 0U, {{0U}}};
 
   board_a_model_init(&model, 2U);
   board_a_model_apply_loaded_config(&model, &loaded, 41U);
@@ -317,6 +317,113 @@ static int test_extended_status_block(void)
   return 0;
 }
 
+static int test_real_ds18b20_record_and_register_link(void)
+{
+  board_a_model_t model;
+  board_a_sensor_snapshot_t sensors;
+  board_a_record_format_record_t record;
+  uint16_t values[24];
+  uint8_t index;
+
+  board_a_model_init(&model, 12U);
+  memset(&sensors, 0, sizeof(sensors));
+  sensors.sample_id = 42U;
+  sensors.valid_mask = 0x0007U;
+  sensors.sample_time_us = 1000000U;
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    sensors.sensors[index].sensor_id = index;
+    sensors.sensors[index].sensor_type = BOARD_A_SENSOR_TYPE_DS18B20;
+    sensors.sensors[index].has_value = true;
+    sensors.sensors[index].temperature_x16 =
+        (index == 1U) ? -160 : (int16_t)(250U + (index * 10U));
+    sensors.sensors[index].quality = BOARD_A_QUALITY_OK;
+    sensors.sensors[index].error = BOARD_A_SENSOR_ERROR_NONE;
+    sensors.sensors[index].rom_short = (uint16_t)(0x1200U + index);
+    sensors.sensors[index].sample_time_ms = 1000U + index;
+  }
+
+  CHECK(board_a_model_set_data_source(
+      &model, BOARD_A_DATA_SOURCE_REAL_DS18B20));
+  board_a_model_publish_sensor_snapshot(&model, &sensors);
+  CHECK(board_a_model_read_registers(
+      &model, MODBUS_REGISTER_INPUT,
+      BOARD_A_INPUT_DS18B20_CONTRACT_REVISION, 5U, values, 1000000U) ==
+      MODBUS_RESULT_OK);
+  CHECK(((uint32_t)values[3] << 16U | values[4]) == 42U);
+  CHECK(write_config(&model, 10U, 7U, 0U) == MODBUS_RESULT_OK);
+  CHECK(execute_command(&model, BOARD_A_COMMAND_APPLY_CONFIG, 0U, 0U) ==
+        MODBUS_RESULT_OK);
+  CHECK(execute_command(&model, BOARD_A_COMMAND_START, 0U, 0U) ==
+        MODBUS_RESULT_OK);
+  board_a_model_tick(&model, 1000000U);
+  CHECK(board_a_model_pop_record(&model, &record));
+  CHECK(record.source == BOARD_A_DATA_SOURCE_REAL_DS18B20);
+  CHECK(record.sequence == 1U);
+  CHECK(record.ds18b20_valid_mask == 0x0007U);
+  CHECK(record.ds18b20_sample_id == 42U);
+  CHECK(record.ds18b20_temperature_x16[0] == 250);
+  CHECK(record.ds18b20_temperature_x16[1] == -160);
+  CHECK(record.ds18b20_temperature_x16[2] == 270);
+  CHECK(record.ds18b20_quality[0] == BOARD_A_QUALITY_OK);
+  CHECK(record.ds18b20_rom_short[2] == 0x1202U);
+  CHECK(record.ds18b20_sample_time_ms[2] == 1002U);
+
+  CHECK(board_a_model_read_registers(
+      &model, MODBUS_REGISTER_INPUT,
+      BOARD_A_INPUT_DS18B20_CONTRACT_REVISION,
+      (uint16_t)(sizeof(values) / sizeof(values[0])), values,
+      1000000U) == MODBUS_RESULT_OK);
+  CHECK(values[0] == 2U);
+  CHECK(values[1] == BOARD_A_DATA_SOURCE_REAL_DS18B20);
+  CHECK(values[2] == 0x0007U);
+  CHECK(((uint32_t)values[3] << 16U | values[4]) ==
+        record.ds18b20_sample_id);
+  CHECK(values[5] == 250U);
+  CHECK(values[6] == (uint16_t)-160);
+  CHECK(values[8] == BOARD_A_QUALITY_OK);
+  CHECK(values[11] == BOARD_A_SENSOR_ERROR_NONE);
+  CHECK(((uint32_t)values[14] << 16U | values[15]) == 1000U);
+  CHECK(((uint32_t)values[18] << 16U | values[19]) == 1002U);
+  CHECK(values[20] == BOARD_A_SENSOR_TYPE_DS18B20);
+  CHECK(values[23] == 0x1202U);
+  return 0;
+}
+
+static int test_real_ds18b20_not_present_record(void)
+{
+  board_a_model_t model;
+  board_a_sensor_snapshot_t sensors;
+  board_a_record_format_record_t record;
+  uint8_t index;
+
+  board_a_model_init(&model, 13U);
+  memset(&sensors, 0, sizeof(sensors));
+  sensors.sample_id = 7U;
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    sensors.sensors[index].sensor_id = index;
+    sensors.sensors[index].sensor_type = BOARD_A_SENSOR_TYPE_DS18B20;
+    sensors.sensors[index].quality = BOARD_A_QUALITY_NOT_PRESENT;
+    sensors.sensors[index].error = BOARD_A_SENSOR_ERROR_RESET_TIMEOUT;
+    sensors.sensors[index].sample_time_ms = 500U + index;
+  }
+  CHECK(board_a_model_set_data_source(
+      &model, BOARD_A_DATA_SOURCE_REAL_DS18B20));
+  board_a_model_publish_sensor_snapshot(&model, &sensors);
+  CHECK(write_config(&model, 10U, 7U, 0U) == MODBUS_RESULT_OK);
+  CHECK(execute_command(&model, BOARD_A_COMMAND_APPLY_CONFIG, 0U, 0U) ==
+        MODBUS_RESULT_OK);
+  CHECK(execute_command(&model, BOARD_A_COMMAND_START, 0U, 0U) ==
+        MODBUS_RESULT_OK);
+  board_a_model_tick(&model, 1000000U);
+  CHECK(board_a_model_pop_record(&model, &record));
+  CHECK(record.source == BOARD_A_DATA_SOURCE_REAL_DS18B20);
+  CHECK(record.ds18b20_sample_id == 7U);
+  CHECK(record.ds18b20_valid_mask == 0U);
+  CHECK(record.ds18b20_quality[0] == BOARD_A_QUALITY_NOT_PRESENT);
+  CHECK(record.ds18b20_temperature_x16[0] == 0);
+  return 0;
+}
+
 int main(void)
 {
   CHECK(test_save_mailbox_capture_and_busy() == 0);
@@ -326,6 +433,8 @@ int main(void)
   CHECK(test_queue_full_drop_new() == 0);
   CHECK(test_stop_drain_and_finite_stop() == 0);
   CHECK(test_extended_status_block() == 0);
+  CHECK(test_real_ds18b20_record_and_register_link() == 0);
+  CHECK(test_real_ds18b20_not_present_record() == 0);
   puts("PASS test_model_persistence");
   return 0;
 }

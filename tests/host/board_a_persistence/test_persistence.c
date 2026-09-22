@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "board_a_model.h"
 #include "board_a_persistence.h"
 #include "board_a_record_format.h"
 #include "board_a_storage_engine.h"
@@ -45,10 +46,12 @@ static board_a_record_format_record_t make_record(uint32_t sequence,
 
 static int test_config_payload_codec(void)
 {
-  static const board_a_persisted_config_t cases[] = {
-    {10U, 1U, 0U},
-    {3600U, 15U, 65535U},
-    {1234U, 0x000AU, 42U},
+  static const uint8_t known_rom[8] = {
+      0x28U, 0xFFU, 0x64U, 0x1EU, 0x5BU, 0x16U, 0x03U, 0x75U};
+  const board_a_persisted_config_t cases[] = {
+    {10U, 1U, 0U, 0U, {{0U}}},
+    {3600U, 15U, 65535U, 0U, {{0U}}},
+    {1234U, 0x000AU, 42U, 0x00U, {{0U}}},
   };
   uint8_t payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
   board_a_persisted_config_t decoded;
@@ -59,14 +62,24 @@ static int test_config_payload_codec(void)
                                         sizeof(payload)));
     CHECK(payload[0] == 'B');
     CHECK(payload[1] == '4');
-    CHECK(payload[2] == 1U);
+    CHECK(payload[2] == BOARD_A_CONFIG_PAYLOAD_SCHEMA);
     CHECK(payload[3] == 0U);
-    CHECK(payload[10] == 0U);
+    CHECK(payload[10] == cases[index].sensor_valid_mask);
     CHECK(payload[11] == 0U);
     CHECK(board_a_config_payload_decode(payload, sizeof(payload), &decoded));
     CHECK(decoded.period_sec == cases[index].period_sec);
     CHECK(decoded.channel_mask == cases[index].channel_mask);
     CHECK(decoded.record_count == cases[index].record_count);
+    CHECK(decoded.sensor_valid_mask == cases[index].sensor_valid_mask);
+  }
+  {
+    board_a_persisted_config_t mapped = cases[0];
+    mapped.sensor_valid_mask = 0x01U;
+    memcpy(mapped.sensor_roms[0], known_rom, sizeof(known_rom));
+    CHECK(board_a_config_payload_encode(&mapped, payload, sizeof(payload)));
+    CHECK(board_a_config_payload_decode(payload, sizeof(payload), &decoded));
+    CHECK(decoded.sensor_valid_mask == 0x01U);
+    CHECK(memcmp(decoded.sensor_roms[0], known_rom, sizeof(known_rom)) == 0);
   }
   return 0;
 }
@@ -74,7 +87,7 @@ static int test_config_payload_codec(void)
 static int test_config_payload_rejections(void)
 {
   uint8_t payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
-  board_a_persisted_config_t config = {10U, 1U, 0U};
+  board_a_persisted_config_t config = {10U, 1U, 0U, 0U, {{0U}}};
   board_a_persisted_config_t decoded;
 
   CHECK(!board_a_config_payload_encode(&config, payload,
@@ -93,18 +106,32 @@ static int test_config_payload_rejections(void)
   payload[0] = 'X';
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[0] = 'B';
-  payload[2] = 2U;
+  payload[2] = 3U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
-  payload[2] = 1U;
+  payload[2] = BOARD_A_CONFIG_PAYLOAD_SCHEMA;
   payload[3] = 1U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[3] = 0U;
   payload[10] = 1U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[10] = 0U;
+  payload[11] = 1U;
+  CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
+  payload[11] = 0U;
   payload[4] = 9U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   CHECK(!board_a_config_payload_decode(payload, sizeof(payload), &decoded));
+  {
+    uint8_t legacy[BOARD_A_CONFIG_PAYLOAD_SCHEMA1_SIZE] = {0U};
+    legacy[0] = (uint8_t)'B';
+    legacy[1] = (uint8_t)'4';
+    legacy[2] = 1U;
+    legacy[4] = 10U;
+    legacy[6] = 1U;
+    CHECK(board_a_config_payload_validate(legacy, sizeof(legacy)));
+    CHECK(board_a_config_payload_decode(legacy, sizeof(legacy), &decoded));
+    CHECK(decoded.sensor_valid_mask == 0U);
+  }
   return 0;
 }
 
@@ -121,7 +148,13 @@ static int test_record_csv_and_identity(void)
   static const char expected_header[] =
       "schema,session,seq,trigger,planned_ms,actual_ms,utc_valid,utc_s,"
       "config_version,period_s,mask,sample_count,source,v0,v1,v2,v3,u0,u1,"
-      "u2,u3,q0,q1,q2,q3,file_id,file_date,reserved\n";
+      "u2,u3,q0,q1,q2,q3,file_id,file_date,reserved,"
+      "ds18b20_valid_mask,ds18b20_sample_id,"
+      "ds18b20_0_temp_x16,ds18b20_1_temp_x16,ds18b20_2_temp_x16,"
+      "ds18b20_0_quality,ds18b20_1_quality,ds18b20_2_quality,"
+      "ds18b20_0_error,ds18b20_1_error,ds18b20_2_error,"
+      "ds18b20_0_rom_short,ds18b20_1_rom_short,ds18b20_2_rom_short,"
+      "ds18b20_0_sample_ms,ds18b20_1_sample_ms,ds18b20_2_sample_ms\n";
 
   CHECK(strcmp(board_a_record_format_csv_header(), expected_header) == 0);
   CHECK(board_a_record_format_encode_csv(&record, buffer, sizeof(buffer),
@@ -134,7 +167,7 @@ static int test_record_csv_and_identity(void)
       commas++;
     }
   }
-  CHECK(commas == 27U);
+  CHECK(commas == 44U);
   CHECK(memchr(buffer, '\r', length) == NULL);
   CHECK(!board_a_record_format_encode_csv(&record, small, length - 1U,
                                           &index));
@@ -174,6 +207,15 @@ static int test_maximum_csv_record(void)
   for (channel = 0U; channel < BOARD_A_RECORD_CHANNEL_COUNT; channel++) {
     record.units[channel] = 1U;
     record.qualities[channel] = 1U;
+  }
+  record.ds18b20_valid_mask = 0U;
+  record.ds18b20_sample_id = 0U;
+  for (channel = 0U; channel < BOARD_A_RECORD_DS18B20_COUNT; channel++) {
+    record.ds18b20_temperature_x16[channel] = 0;
+    record.ds18b20_quality[channel] = 0U;
+    record.ds18b20_error[channel] = 0U;
+    record.ds18b20_rom_short[channel] = 0U;
+    record.ds18b20_sample_time_ms[channel] = 0U;
   }
   CHECK(board_a_record_format_is_valid(&record));
   CHECK(board_a_record_format_encode_csv(&record, buffer, sizeof(buffer),
@@ -675,6 +717,65 @@ static int test_record_path_capacity_boundaries(void)
   return 0;
 }
 
+static int test_ds18b20_csv_payload(void)
+{
+  fake_storage_io_t fake;
+  board_a_storage_engine_t engine;
+  board_a_storage_io_ops_t ops = FAKE_STORAGE_OPS;
+  board_a_record_format_record_t record = make_record(9U, 1U, 1709164800U);
+  uint8_t buffer[BOARD_A_RECORD_CSV_MAX_BYTES + 1U];
+  size_t length = 0U;
+  uint8_t channel;
+
+  record.source = BOARD_A_DATA_SOURCE_REAL_DS18B20;
+  for (channel = 0U; channel < BOARD_A_RECORD_CHANNEL_COUNT; ++channel) {
+    record.values[channel] = 0U;
+    record.units[channel] = BOARD_A_UNIT_TEMPERATURE_X16;
+    record.qualities[channel] = BOARD_A_QUALITY_UNAVAILABLE;
+  }
+  record.ds18b20_valid_mask = 0x0007U;
+  record.ds18b20_sample_id = 42U;
+  record.ds18b20_temperature_x16[0] = 230;
+  record.ds18b20_temperature_x16[1] = -160;
+  record.ds18b20_temperature_x16[2] = 0;
+  record.ds18b20_quality[0] = BOARD_A_QUALITY_OK;
+  record.ds18b20_quality[1] = BOARD_A_QUALITY_STALE;
+  record.ds18b20_quality[2] = BOARD_A_QUALITY_OK;
+  record.ds18b20_error[1] = BOARD_A_SENSOR_ERROR_SCRATCHPAD_CRC;
+  record.ds18b20_rom_short[0] = 0x1200U;
+  record.ds18b20_rom_short[1] = 0x1201U;
+  record.ds18b20_rom_short[2] = 0x1202U;
+  record.ds18b20_sample_time_ms[0] = 1000U;
+  record.ds18b20_sample_time_ms[1] = 2000U;
+  record.ds18b20_sample_time_ms[2] = 3000U;
+
+  CHECK(board_a_record_format_is_valid(&record));
+  CHECK(board_a_record_format_encode_csv(&record, buffer,
+                                         sizeof(buffer) - 1U, &length));
+  buffer[length] = 0U;
+  CHECK(buffer[0] == (uint8_t)'3');
+  CHECK(strstr((const char *)buffer,
+               ",7,42,230,-160,0,1,5,1,0,6,0,"
+               "4608,4609,4610,1000,2000,3000\n") != NULL);
+
+  fake_storage_init(&fake);
+  ops.context = &fake;
+  board_a_storage_engine_init(&engine);
+  CHECK(board_a_storage_engine_probe(&engine, &ops, 2000U));
+  CHECK(board_a_storage_engine_process(&engine, &ops, &record, 2000U) ==
+        BOARD_A_STORAGE_RECORD_SYNCED);
+  CHECK(fake.last_length > 0U);
+  CHECK(fake.last_length < sizeof(fake.bytes));
+  fake.bytes[fake.last_length] = 0U;
+  CHECK(strstr((const char *)fake.bytes,
+               ",7,42,230,-160,0,1,5,1,0,6,0,"
+               "4608,4609,4610,1000,2000,3000\n") != NULL);
+
+  record.ds18b20_valid_mask = 0U;
+  CHECK(!board_a_record_format_is_valid(&record));
+  return 0;
+}
+
 int main(void)
 {
   CHECK(test_config_payload_codec() == 0);
@@ -689,6 +790,7 @@ int main(void)
   CHECK(test_storage_engine_name_batch_and_deadline() == 0);
   CHECK(test_queue_requeue_when_full_keeps_old_record() == 0);
   CHECK(test_record_path_capacity_boundaries() == 0);
+  CHECK(test_ds18b20_csv_payload() == 0);
   puts("PASS test_persistence");
   return 0;
 }

@@ -19,6 +19,7 @@ typedef struct {
 
 typedef struct {
   uint16_t run_state;
+  uint16_t data_source;
   uint16_t last_command;
   uint16_t command_result;
   uint32_t last_command_id;
@@ -43,6 +44,22 @@ void board_a_runtime_init(board_a_runtime_t *runtime,
                           uint32_t session_id,
                           const board_a_runtime_ops_t *ops,
                           void *context);
+
+bool board_a_runtime_set_data_source(board_a_runtime_t *runtime,
+                                     uint16_t source);
+
+void board_a_runtime_publish_sensor_snapshot(
+    board_a_runtime_t *runtime,
+    const board_a_sensor_snapshot_t *snapshot);
+
+bool board_a_runtime_publish_sensor_map(
+    board_a_runtime_t *runtime, const board_a_sensor_map_t *map);
+
+bool board_a_runtime_copy_sensor_map(
+    board_a_runtime_t *runtime, board_a_sensor_map_t *map);
+
+bool board_a_runtime_request_sensor_map_save(
+    board_a_runtime_t *runtime, uint32_t command_id);
 
 /* Only the single CommTask/test owner may call this function. */
 void board_a_runtime_push_byte(board_a_runtime_t *runtime,

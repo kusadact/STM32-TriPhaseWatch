@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "FreeRTOS.h"
+#include "../sensors/sensor_manager.h"
 #include "board_a_log_schedule.h"
 #include "board_a_monotonic.h"
 #include "board_a_persistence_tasks.h"
@@ -21,7 +22,7 @@
 #define BOARD_A_T35_US 4011U
 #define BOARD_A_RX_QUEUE_CAPACITY 512U
 #define BOARD_A_COMM_TASK_PRIORITY 3U
-#define BOARD_A_ACQUISITION_TASK_PRIORITY 2U
+#define BOARD_A_ACQUISITION_TASK_PRIORITY 4U
 #define BOARD_A_COMM_STACK_WORDS 1024U
 #define BOARD_A_ACQUISITION_STACK_WORDS 512U
 #define BOARD_A_CONFIG_STACK_WORDS 512U
@@ -35,6 +36,8 @@
 
 _Static_assert(configPRIO_BITS == 4U, "board A expects four NVIC priority bits");
 _Static_assert(configTICK_RATE_HZ == 1000U, "board A expects a 1 kHz tick");
+_Static_assert(BOARD_A_ACQUISITION_TASK_PRIORITY < configMAX_PRIORITIES,
+               "DS18B20 acquisition priority must be valid");
 _Static_assert(BOARD_A_USART2_PREEMPTION_PRIORITY ==
                    configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY,
                "USART2 priority must be at or below the RTOS syscall limit");
@@ -86,6 +89,7 @@ static board_a_monotonic_t g_monotonic;
 static board_a_tx_t g_tx;
 static board_a_rx_recovery_t g_rx_recovery;
 static board_a_log_schedule_t g_log_schedule;
+static board_a_sensor_manager_t g_sensor_manager;
 
 static QueueHandle_t g_rx_queue;
 static SemaphoreHandle_t g_model_mutex;
@@ -281,6 +285,78 @@ uint32_t board_a_rtos_now_ms(void)
 {
   (void)board_a_rtos_now_us(NULL);
   return board_a_monotonic_ms(&g_monotonic);
+}
+
+static uint64_t sensor_port_now_us(void *context)
+{
+  (void)context;
+  return board_a_rtos_now_us(NULL);
+}
+
+static void sensor_port_delay_us(void *context, uint32_t delay_us)
+{
+  uint64_t started_us;
+
+  (void)context;
+  started_us = board_a_rtos_now_us(NULL);
+  while ((board_a_rtos_now_us(NULL) - started_us) < delay_us) {
+    /* 1-Wire timing is microsecond-scale; keep this bounded and short. */
+  }
+}
+
+static void sensor_port_drive_low(void *context)
+{
+  GPIO_InitTypeDef gpio;
+
+  (void)context;
+  gpio.GPIO_Pin = GPIO_Pin_9;
+  gpio.GPIO_Mode = GPIO_Mode_OUT;
+  gpio.GPIO_Speed = GPIO_Speed_50MHz;
+  gpio.GPIO_OType = GPIO_OType_PP;
+  gpio.GPIO_PuPd = GPIO_PuPd_NOPULL;
+  GPIO_Init(GPIOG, &gpio);
+  GPIO_ResetBits(GPIOG, GPIO_Pin_9);
+}
+
+static void sensor_port_release_bus(void *context)
+{
+  GPIO_InitTypeDef gpio;
+
+  (void)context;
+  gpio.GPIO_Pin = GPIO_Pin_9;
+  gpio.GPIO_Mode = GPIO_Mode_IN;
+  gpio.GPIO_Speed = GPIO_Speed_50MHz;
+  gpio.GPIO_OType = GPIO_OType_PP;
+  gpio.GPIO_PuPd = GPIO_PuPd_UP;
+  GPIO_Init(GPIOG, &gpio);
+}
+
+static bool sensor_port_read_level(void *context)
+{
+  (void)context;
+  return GPIO_ReadInputDataBit(GPIOG, GPIO_Pin_9) != Bit_RESET;
+}
+
+static const ds18b20_port_t g_sensor_port = {
+  NULL,
+  sensor_port_now_us,
+  sensor_port_delay_us,
+  sensor_port_drive_low,
+  sensor_port_release_bus,
+  sensor_port_read_level
+};
+
+static void sensor_gpio_init(void)
+{
+  GPIO_InitTypeDef gpio;
+
+  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOG, ENABLE);
+  gpio.GPIO_Mode = GPIO_Mode_IN;
+  gpio.GPIO_Speed = GPIO_Speed_50MHz;
+  gpio.GPIO_OType = GPIO_OType_PP;
+  gpio.GPIO_PuPd = GPIO_PuPd_UP;
+  gpio.GPIO_Pin = GPIO_Pin_9;
+  GPIO_Init(GPIOG, &gpio);
 }
 
 void board_a_rtos_note_config_stack(uint32_t min_words)
@@ -745,7 +821,8 @@ static void comm_task(void *argument)
  * extending even when no deadline is near.
  */
 static uint32_t acquisition_wait_ms(const board_a_runtime_status_t *status,
-                                    uint64_t now_us)
+                                    uint64_t now_us,
+                                    uint64_t sensor_scan_us)
 {
   uint64_t earliest_us = 0U;
   uint64_t remaining_us;
@@ -764,6 +841,11 @@ static uint32_t acquisition_wait_ms(const board_a_runtime_status_t *status,
     earliest_us = status->schedule_deadline_us;
     have_deadline = true;
   }
+  if ((sensor_scan_us != 0U) &&
+      (!have_deadline || (sensor_scan_us < earliest_us))) {
+    earliest_us = sensor_scan_us;
+    have_deadline = true;
+  }
 
   if (!have_deadline) {
     return BOARD_A_MAX_WAIT_MS;
@@ -777,6 +859,38 @@ static uint32_t acquisition_wait_ms(const board_a_runtime_status_t *status,
     return BOARD_A_MAX_WAIT_MS;
   }
   return (uint32_t)((remaining_us + 999ULL) / 1000ULL);
+}
+
+static void sensor_scan_if_due(uint64_t now_us)
+{
+  board_a_runtime_status_t status;
+  board_a_sensor_snapshot_t snapshot;
+  board_a_sensor_map_t runtime_map;
+  board_a_sensor_map_t manager_map;
+
+  if (!board_a_runtime_copy_status(&g_runtime, &status) ||
+      (status.data_source != BOARD_A_DATA_SOURCE_REAL_DS18B20)) {
+    return;
+  }
+  if (board_a_runtime_copy_sensor_map(&g_runtime, &runtime_map) &&
+      (runtime_map.valid_mask != 0U) &&
+      board_a_sensor_manager_copy_map(&g_sensor_manager, &manager_map) &&
+      (manager_map.valid_mask == 0U)) {
+    (void)board_a_sensor_manager_set_map(&g_sensor_manager, &runtime_map);
+  }
+  if (board_a_sensor_manager_step(&g_sensor_manager, now_us, &snapshot)) {
+    board_a_runtime_publish_sensor_snapshot(&g_runtime, &snapshot);
+  }
+  if (board_a_sensor_manager_take_map_dirty(&g_sensor_manager) &&
+      board_a_sensor_manager_copy_map(&g_sensor_manager, &manager_map)) {
+    (void)board_a_runtime_publish_sensor_map(&g_runtime, &manager_map);
+    if (!board_a_runtime_request_sensor_map_save(
+            &g_runtime, (uint32_t)(now_us ^ (now_us >> 32U)))) {
+      board_a_sensor_manager_mark_map_dirty(&g_sensor_manager);
+    } else if (g_config_task != NULL) {
+      xTaskNotifyGive(g_config_task);
+    }
+  }
 }
 
 static void acquisition_task(void *argument)
@@ -793,6 +907,15 @@ static void acquisition_task(void *argument)
   for (;;) {
     uint64_t now_us = board_a_rtos_now_us(NULL);
     board_a_runtime_status_t before_tick;
+
+    /*
+     * A due sensor scan runs before the scheduler tick so a new record uses
+     * the latest complete DS18B20 snapshot. The record period remains anchored
+     * to the model's planned deadline; this bounded scan only affects the
+     * actual completion time.
+     */
+    sensor_scan_if_due(now_us);
+    now_us = board_a_rtos_now_us(NULL);
 
     if (board_a_runtime_copy_status(&g_runtime, &before_tick) &&
         (before_tick.run_state == BOARD_A_RUN_RUNNING) &&
@@ -814,6 +937,10 @@ static void acquisition_task(void *argument)
     if (!board_a_runtime_copy_status(&g_runtime, &status)) {
       wait_ms = BOARD_A_MAX_WAIT_MS;
     } else {
+      uint64_t sensor_scan_us =
+          (status.data_source == BOARD_A_DATA_SOURCE_REAL_DS18B20) ?
+          board_a_sensor_manager_next_step_us(&g_sensor_manager) : 0U;
+
       if (status.schedule_start_late_us >
           g_board_a_rtos_diag.schedule_start_late_max_us) {
         g_board_a_rtos_diag.schedule_start_late_max_us =
@@ -821,7 +948,7 @@ static void acquisition_task(void *argument)
       }
       g_board_a_rtos_diag.schedule_start_count =
           status.schedule_start_count;
-      wait_ms = acquisition_wait_ms(&status, now_us);
+      wait_ms = acquisition_wait_ms(&status, now_us, sensor_scan_us);
     }
 
     (void)xTaskNotifyWait(0U, 0xFFFFFFFFUL, &notification_value,
@@ -846,6 +973,8 @@ static void create_runtime_objects(void)
   }
 
   board_a_runtime_init(&g_runtime, 1U, &g_runtime_ops, NULL);
+  (void)board_a_runtime_set_data_source(
+      &g_runtime, BOARD_A_DATA_SOURCE_REAL_DS18B20);
 
   g_comm_task = xTaskCreateStatic(
       comm_task, "comm", BOARD_A_COMM_STACK_WORDS, NULL,
@@ -875,11 +1004,14 @@ int board_a_rtos_run(void)
   debug_uart_puts("\r\n[board-a] Modbus RTU slave / FreeRTOS\r\n");
   debug_uart_puts("[board-a] addr=1 uart=USART2 PA2/PA3 PG8 9600 8E1\r\n");
   debug_uart_puts("[board-a] debug=USART1 PA9/PA10 115200 8N1\r\n");
+  debug_uart_puts("[board-a] ds18b20=PG9 shared 1-Wire, 1s scan\r\n");
 
   board_a_tx_init(&g_tx);
   board_a_rx_recovery_init(&g_rx_recovery, BOARD_A_T35_US);
   board_a_log_schedule_init(&g_log_schedule, BOARD_A_LOG_PERIOD_US, 0U);
   delay_init(168U);
+  sensor_gpio_init();
+  board_a_sensor_manager_init(&g_sensor_manager, &g_sensor_port);
   create_runtime_objects();
   rs485_init();
   board_a_persistence_startup(&g_runtime);
