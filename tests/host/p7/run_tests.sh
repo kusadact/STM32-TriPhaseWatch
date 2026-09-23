@@ -17,7 +17,9 @@ run_step "$ROOT_DIR/tests/host/board_a/run_tests.sh"
 run_step "$ROOT_DIR/tests/host/board_a_persistence/run_tests.sh"
 run_step "$ROOT_DIR/tests/host/board_a_rtos/run_tests.sh"
 run_step "$ROOT_DIR/tests/host/eeprom/run_tests.sh"
-run_step "$ROOT_DIR/tests/host/mac_cli/run_tests.sh"
+if [[ "${P7_SKIP_MAC_CLI:-0}" != "1" ]]; then
+  run_step "$ROOT_DIR/tests/host/mac_cli/run_tests.sh"
+fi
 run_step "$ROOT_DIR/tests/host/modbus_gui/run_tests.sh"
 run_step python3 -m unittest discover -s "$ROOT_DIR/tests/host/persistence_verifier" -v
 run_step "$ROOT_DIR/firmware/build/build_board_a.sh"
