@@ -444,13 +444,21 @@ def decode_thermal_alarm(values: Sequence[int]) -> dict[str, Any]:
                 6: 3,
                 7: 4,
             }[reason]
-            if qualities[phase_index] != expected_quality:
+            quality = qualities[phase_index]
+            latched = bool(flags & ALARM_FLAG_LATCHED)
+            if quality != expected_quality and not (
+                latched and _quality_is_displayable(quality)
+            ):
                 raise ValueError(
                     "sensor fault reason does not match trigger phase quality"
                 )
         elif trigger_phase != 0:
             raise ValueError("non-sensor fault reason requires NONE phase")
-        if reason == 8 and displayable_count >= 2:
+        if (
+            reason == 8
+            and displayable_count >= 2
+            and not (flags & ALARM_FLAG_LATCHED)
+        ):
             raise ValueError(
                 "INSUFFICIENT_VALID_PHASES requires fewer than two valid phases"
             )

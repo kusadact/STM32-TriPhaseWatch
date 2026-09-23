@@ -149,6 +149,28 @@ class ThermalAlarmRegisterTests(unittest.TestCase):
         self.assertIsNone(decoded["maximum_delta_x16"])
         self.assertIsNone(decoded["phases"][1]["temperature_x16"])
 
+    def test_latched_fault_recovery_window_is_readable(self) -> None:
+        values = thermal_alarm_values()
+        values[1] = 4
+        values[2] = 4
+        values[3] = registers.ALARM_FLAG_VALID | registers.ALARM_FLAG_LATCHED
+        values[4] = 1
+        values[5] = 0
+        values[6] = 0
+        values[7] = 419
+        values[8] = 3
+        values[9:12] = [411, 412, 419]
+        values[12:15] = [1, 1, 1]
+
+        decoded = registers.decode_thermal_alarm(values)
+
+        self.assertEqual(decoded["level"], "SENSOR_FAULT")
+        self.assertEqual(decoded["reason"], "SENSOR_NOT_PRESENT")
+        self.assertTrue(decoded["latched"])
+        self.assertFalse(decoded["delta_valid"])
+        self.assertIsNone(decoded["maximum_delta_x16"])
+        self.assertEqual(decoded["phases"][0]["quality"], "OK")
+
         values[5] = 1
         values[6] = 0
         values[11] = 336
