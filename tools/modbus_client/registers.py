@@ -75,6 +75,7 @@ THERMAL_STATE_INPUT_START = 0x00B0
 THERMAL_STATE_INPUT_COUNT = 53
 THERMAL_ALARM_CONFIG_START = 0x0050
 THERMAL_ALARM_CONFIG_COUNT = 16
+THERMAL_ALARM_CONFIG_REVISION = 1
 
 ALARM_LEVEL_NAMES = {
     0: "NORMAL",
@@ -553,21 +554,23 @@ def decode_thermal_alarm_config(values: Sequence[int]) -> dict[str, Any]:
     """Decode the P7A alarm configuration block at holding 0x0050."""
 
     _require_length(values, THERMAL_ALARM_CONFIG_COUNT, "thermal alarm config")
-    phase_notice = _i16(values[0])
-    phase_warning = _i16(values[1])
-    phase_critical = _i16(values[2])
-    delta_notice = _i16(values[3])
-    delta_warning = _i16(values[4])
-    delta_critical = _i16(values[5])
-    rise_notice = _i16(values[6])
-    rise_warning = _i16(values[7])
-    rise_critical = _i16(values[8])
-    assert_samples = values[9]
-    clear_samples = values[10]
-    hysteresis = _i16(values[11])
-    rise_window_samples = values[12]
-    rise_window_min_ms = _word32(values[13], values[14])
-    buzzer_enable = values[15]
+    if values[0] != THERMAL_ALARM_CONFIG_REVISION:
+        raise ValueError(
+            f"unsupported thermal alarm config revision {values[0]}"
+        )
+    phase_notice = _i16(values[1])
+    phase_warning = _i16(values[2])
+    phase_critical = _i16(values[3])
+    delta_notice = _i16(values[4])
+    delta_warning = _i16(values[5])
+    delta_critical = _i16(values[6])
+    rise_notice = _i16(values[7])
+    rise_warning = _i16(values[8])
+    rise_critical = _i16(values[9])
+    assert_samples = values[10]
+    clear_samples = values[11]
+    hysteresis = _i16(values[12])
+    buzzer_enable = values[13]
 
     _require_range(phase_notice, -880, 2000, "phase_notice_x16")
     _require_range(phase_warning, -880, 2000, "phase_warning_x16")
@@ -587,12 +590,12 @@ def decode_thermal_alarm_config(values: Sequence[int]) -> dict[str, Any]:
         raise ValueError("delta recovery threshold cannot be negative")
     if rise_notice - hysteresis < 0:
         raise ValueError("rise recovery threshold cannot be negative")
-    _require_range(rise_window_samples, 2, 8, "rise_window_samples")
-    _require_range(rise_window_min_ms, 1, 3600000, "rise_window_min_ms")
     _require_range(buzzer_enable, 0, 1, "buzzer_enable")
+    if values[14] != 0 or values[15] != 0:
+        raise ValueError("thermal alarm config reserved registers must be 0")
 
     return {
-        "contract_revision": 1,
+        "contract_revision": values[0],
         "phase_notice_x16": phase_notice,
         "phase_warning_x16": phase_warning,
         "phase_critical_x16": phase_critical,
@@ -605,8 +608,6 @@ def decode_thermal_alarm_config(values: Sequence[int]) -> dict[str, Any]:
         "assert_samples": assert_samples,
         "clear_samples": clear_samples,
         "hysteresis_x16": hysteresis,
-        "rise_window_samples": rise_window_samples,
-        "rise_window_min_ms": rise_window_min_ms,
         "buzzer_enable": bool(buzzer_enable),
     }
 

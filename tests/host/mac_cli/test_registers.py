@@ -41,6 +41,7 @@ def thermal_alarm_values() -> list[int]:
 
 def alarm_config_values() -> list[int]:
     return [
+        1,
         50 * 16,
         55 * 16,
         75 * 16,
@@ -53,10 +54,9 @@ def alarm_config_values() -> list[int]:
         3,
         5,
         2 * 16,
-        4,
-        0,
-        1000,
         1,
+        0,
+        0,
     ]
 
 
@@ -230,17 +230,22 @@ class ThermalAlarmRegisterTests(unittest.TestCase):
         self.assertEqual(decoded["delta_notice_x16"], 5 * 16)
         self.assertEqual(decoded["assert_samples"], 3)
         self.assertEqual(decoded["clear_samples"], 5)
-        self.assertEqual(decoded["rise_window_min_ms"], 1000)
+        self.assertEqual(decoded["contract_revision"], 1)
         self.assertTrue(decoded["buzzer_enable"])
 
     def test_rejects_invalid_alarm_config(self) -> None:
         values = alarm_config_values()
-        values[1] = values[0]
+        values[2] = values[1]
         with self.assertRaises(ValueError):
             registers.decode_thermal_alarm_config(values)
 
         values = alarm_config_values()
-        values[15] = 2
+        values[13] = 2
+        with self.assertRaises(ValueError):
+            registers.decode_thermal_alarm_config(values)
+
+        values = alarm_config_values()
+        values[14] = 1
         with self.assertRaises(ValueError):
             registers.decode_thermal_alarm_config(values)
 

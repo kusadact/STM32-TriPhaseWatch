@@ -146,6 +146,7 @@ def observation_values(
 
 def alarm_config_values() -> tuple[int, ...]:
     return (
+        1,
         50 * 16,
         55 * 16,
         75 * 16,
@@ -158,10 +159,9 @@ def alarm_config_values() -> tuple[int, ...]:
         3,
         5,
         2 * 16,
-        4,
-        0,
-        1000,
         1,
+        0,
+        0,
     )
 
 
