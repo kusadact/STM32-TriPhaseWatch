@@ -760,16 +760,6 @@ bool board_a_alarm_update(board_a_alarm_t *alarm,
     next_state.coldest_phase = BOARD_A_ALARM_PHASE_NONE;
     next_state.hottest_temperature_x16 = 0;
   }
-  /*
-   * A fault is published as the authoritative alarm state. Keep the phase
-   * readings for diagnosis, but do not expose a delta that could be mistaken
-   * for a valid temperature-difference alarm.
-   */
-  if (next_state.fault_mask != 0U) {
-    next_state.delta_valid = false;
-    next_state.maximum_delta_x16 = 0;
-  }
-
   alarm->last_sample_id = snapshot->sample_id;
   alarm->last_sample_time_us = snapshot->sample_time_us;
   alarm->has_last_sample = true;
@@ -830,6 +820,16 @@ bool board_a_alarm_update(board_a_alarm_t *alarm,
           alarm, &candidate, &event_type, &event_time_ms);
       alarm->pending_count = 0U;
     }
+  }
+
+  /*
+   * The published fault state is authoritative even while clear_samples is
+   * still accumulating recovery confirmations. Never expose a delta from a
+   * transient healthy sample during that window.
+   */
+  if (alarm->state.level == BOARD_A_ALARM_SENSOR_FAULT) {
+    alarm->state.delta_valid = false;
+    alarm->state.maximum_delta_x16 = 0;
   }
 
   copy_state_to_result(alarm, result);

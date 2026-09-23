@@ -369,7 +369,6 @@ static void test_configured_clear_samples_and_reevaluation(void)
   board_a_alarm_result_t result;
   uint32_t sample_id = 1U;
   uint64_t time_us = 0U;
-  uint8_t index;
 
   board_a_alarm_default_config(&config);
   config.assert_samples = 2U;
@@ -387,11 +386,17 @@ static void test_configured_clear_samples_and_reevaluation(void)
   CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
   time_us += 100000U;
 
-  for (index = 0U; index < 2U; ++index) {
-    result = run_sample(&alarm, sample_id++, time_us, 400, 400, 400);
-    time_us += 100000U;
-    CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
-  }
+  result = run_sample(&alarm, sample_id++, time_us, 800, 400, 400);
+  time_us += 100000U;
+  CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
+  CHECK(!result.state.delta_valid);
+  CHECK(result.state.maximum_delta_x16 == 0);
+  result = run_sample(&alarm, sample_id++, time_us, 400, 400, 400);
+  time_us += 100000U;
+  CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
+  result = run_sample(&alarm, sample_id++, time_us, 400, 400, 400);
+  time_us += 100000U;
+  CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
   result = run_sample(&alarm, sample_id++, time_us, 400, 400, 400);
   time_us += 100000U;
   CHECK(result.state.level == BOARD_A_ALARM_NORMAL);
