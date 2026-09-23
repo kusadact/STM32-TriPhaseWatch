@@ -682,7 +682,7 @@ def _verify_csv_schema_contract(
     if not isinstance(contract, Mapping):
         return
     expected = contract.get("csv_schema")
-    if expected not in (1, 2):
+    if expected not in (1, 2, 3, 4):
         return
     actual = {
         record.schema
@@ -781,21 +781,54 @@ def _verify_timeline(
         ]
 
     has_utc_records = any(
-        record.utc_valid == 1 for parsed in parsed_files for record in parsed.records
+        record.utc_valid == 1
+        for parsed in parsed_files
+        for record in parsed.records
     )
 
     checked = 0
     missing = 0
     unanchored = 0
     for parsed in parsed_files:
+        sample_timeline: list[tuple[int, float]] = []
+        for sample in parsed.records:
+            if oracle.is_event_record(sample):
+                continue
+            observed = observed_monotonic_by_seq.get(sample.seq)
+            if observed is not None:
+                sample_timeline.append((sample.actual_ms, observed))
+        sample_timeline.sort(key=lambda item: item[0])
+
+        def estimate_event_monotonic(actual_ms: int) -> float | None:
+            if not sample_timeline:
+                return None
+            if len(sample_timeline) == 1:
+                base_ms, base_monotonic = sample_timeline[0]
+                return base_monotonic + (actual_ms - base_ms) / 1000.0
+            for left, right in zip(sample_timeline, sample_timeline[1:]):
+                if left[0] <= actual_ms <= right[0]:
+                    span = right[0] - left[0]
+                    if span == 0:
+                        return left[1]
+                    ratio = (actual_ms - left[0]) / span
+                    return left[1] + ratio * (right[1] - left[1])
+            if actual_ms < sample_timeline[0][0]:
+                base_ms, base_monotonic = sample_timeline[0]
+                return base_monotonic + (actual_ms - base_ms) / 1000.0
+            base_ms, base_monotonic = sample_timeline[-1]
+            return base_monotonic + (actual_ms - base_ms) / 1000.0
+
         previous: oracle.CsvRecord | None = None
         previous_anchor: tuple[float, int] | None = None
         for record_index, record in enumerate(parsed.records):
+            event_record = oracle.is_event_record(record)
             if record.utc_valid != 1:
                 previous = None
                 previous_anchor = None
                 continue
             monotonic = observed_monotonic_by_seq.get(record.seq)
+            if monotonic is None and event_record:
+                monotonic = estimate_event_monotonic(record.actual_ms)
             if monotonic is None:
                 missing += 1
                 previous = None
@@ -826,6 +859,10 @@ def _verify_timeline(
                     path=parsed.relative_path,
                     record_index=record_index,
                 )
+            if event_record:
+                previous = None
+                previous_anchor = None
+                continue
             if len(candidates) > 1:
                 report.add_issue(
                     "utc_segment_evidence",
@@ -950,8 +987,11 @@ def _verify_observation_cross_checks(
     records: Sequence[oracle.CsvRecord],
 ) -> None:
     issue_start = len(report.issues)
-    by_key = {(record.session, record.seq): record for record in records}
-    sessions = {record.session for record in records}
+    normal_records = [
+        record for record in records if not oracle.is_event_record(record)
+    ]
+    by_key = {(record.session, record.seq): record for record in normal_records}
+    sessions = {record.session for record in normal_records}
     checked = 0
     for observation in observations:
         if observation.get("kind") != "snapshot":
@@ -1226,7 +1266,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Read a completed P5 run directory and copied LOG CSV files, "
-            "then independently verify schema 1/2/3, payloads, counters, and hashes."
+            "then independently verify schema 1/2/3/4, payloads, counters, and hashes."
         )
     )
     parser.add_argument(

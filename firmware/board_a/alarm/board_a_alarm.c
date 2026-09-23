@@ -680,6 +680,7 @@ bool board_a_alarm_update(board_a_alarm_t *alarm,
   next_state = alarm->state;
   next_state.valid = true;
   next_state.sample_id = snapshot->sample_id;
+  next_state.sample_time_us = snapshot->sample_time_us;
   next_state.sample_time_ms = snapshot->sample_time_us / 1000U;
   next_state.display_mask = 0U;
   next_state.comparison_mask = 0U;
@@ -869,6 +870,7 @@ void board_a_alarm_force_unknown(board_a_alarm_t *alarm)
   alarm->pending_phase = BOARD_A_ALARM_PHASE_NONE;
   alarm->state.valid = false;
   alarm->state.sample_id = 0U;
+  alarm->state.sample_time_us = 0U;
   alarm->state.sample_time_ms = 0U;
   alarm->state.display_mask = 0U;
   alarm->state.comparison_mask = 0U;

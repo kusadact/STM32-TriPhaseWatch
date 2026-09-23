@@ -746,6 +746,7 @@ def decode_persistence_status(values: Sequence[int]) -> dict[str, Any]:
         "captured_period_s": _word32(values[0x24], values[0x25]),
         "captured_mask": values[0x26],
         "captured_count": values[0x27],
+        "event_dropped": _word32(values[0x28], values[0x29]),
     }
 
 

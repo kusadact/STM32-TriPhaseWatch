@@ -28,6 +28,20 @@ static void put_le16(uint8_t *data, uint16_t value)
   data[1] = (uint8_t)(value >> 8U);
 }
 
+static void put_le32(uint8_t *data, uint32_t value)
+{
+  data[0] = (uint8_t)value;
+  data[1] = (uint8_t)(value >> 8U);
+  data[2] = (uint8_t)(value >> 16U);
+  data[3] = (uint8_t)(value >> 24U);
+}
+
+static void put_le64(uint8_t *data, uint64_t value)
+{
+  put_le32(data, (uint32_t)(value & 0xFFFFFFFFULL));
+  put_le32(&data[4], (uint32_t)(value >> 32U));
+}
+
 static board_a_record_format_record_t make_record(uint32_t sequence,
                                                   uint8_t utc_valid,
                                                   uint32_t utc_seconds)
@@ -62,6 +76,8 @@ static int test_config_payload_codec(void)
       0x28U, 0xFFU, 0x64U, 0x1EU, 0x5BU, 0x16U, 0x03U, 0x75U};
   const board_a_config_t cases[] = {
     {10U, 1U, 0U},
+    {30U, 0x0003U, 0U},
+    {60U, 0x0007U, 1U},
     {3600U, 15U, 65535U},
     {1234U, 0x000AU, 42U},
   };
@@ -153,7 +169,7 @@ static int test_config_payload_rejections(void)
   payload[0] = 'X';
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[0] = 'B';
-  payload[2] = 4U;
+  payload[2] = 5U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[2] = BOARD_A_CONFIG_PAYLOAD_SCHEMA;
   payload[3] = 1U;
@@ -168,6 +184,15 @@ static int test_config_payload_rejections(void)
   payload[61] = 1U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   payload[61] = 0U;
+  payload[68] = 1U;
+  CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
+  put_le32(&payload[72], 7U);
+  put_le64(&payload[76], 123456789ULL);
+  CHECK(board_a_config_payload_validate(payload, sizeof(payload)));
+  payload[68] = 0U;
+  CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
+  put_le32(&payload[72], 0U);
+  put_le64(&payload[76], 0U);
   payload[4] = 9U;
   CHECK(!board_a_config_payload_validate(payload, sizeof(payload)));
   CHECK(!board_a_config_payload_decode(payload, sizeof(payload), &decoded));
@@ -225,7 +250,9 @@ static int test_record_csv_and_identity(void)
       "ds18b20_0_quality,ds18b20_1_quality,ds18b20_2_quality,"
       "ds18b20_0_error,ds18b20_1_error,ds18b20_2_error,"
       "ds18b20_0_rom_short,ds18b20_1_rom_short,ds18b20_2_rom_short,"
-      "ds18b20_0_sample_ms,ds18b20_1_sample_ms,ds18b20_2_sample_ms\n";
+      "ds18b20_0_sample_ms,ds18b20_1_sample_ms,ds18b20_2_sample_ms,"
+      "event_id,event_phase,event_level,event_reason,event_trigger_phase,"
+      "event_max_delta_x16,event_delta_valid,event_flags\n";
 
   CHECK(strcmp(board_a_record_format_csv_header(), expected_header) == 0);
   CHECK(board_a_record_format_encode_csv(&record, buffer, sizeof(buffer),
@@ -238,7 +265,7 @@ static int test_record_csv_and_identity(void)
       commas++;
     }
   }
-  CHECK(commas == 44U);
+  CHECK(commas == 52U);
   CHECK(memchr(buffer, '\r', length) == NULL);
   CHECK(!board_a_record_format_encode_csv(&record, small, length - 1U,
                                           &index));
@@ -288,6 +315,14 @@ static int test_maximum_csv_record(void)
     record.ds18b20_rom_short[channel] = 0U;
     record.ds18b20_sample_time_ms[channel] = 0U;
   }
+  record.event_id = 0U;
+  record.event_phase = BOARD_A_RECORD_EVENT_PHASE_NONE;
+  record.event_level = 0U;
+  record.event_reason = 0U;
+  record.event_trigger_phase = 0U;
+  record.event_max_delta_x16 = 0;
+  record.event_delta_valid = 0U;
+  record.event_flags = 0U;
   CHECK(board_a_record_format_is_valid(&record));
   CHECK(board_a_record_format_encode_csv(&record, buffer, sizeof(buffer),
                                          &length));
@@ -321,6 +356,11 @@ static int test_queue_drop_and_conservation(void)
   CHECK(board_a_persistence_queue_push(&persistence, &record) == 0);
   CHECK(persistence.storage.dropped == 1U);
   CHECK(persistence.storage.count == BOARD_A_RECORD_QUEUE_CAPACITY);
+  CHECK(board_a_persistence_queue_push_event(&persistence, &record) == 0);
+  CHECK(persistence.storage.dropped == 1U);
+  CHECK(persistence.storage.event_dropped == 0U);
+  board_a_persistence_note_event_drop(&persistence);
+  CHECK(persistence.storage.event_dropped == 1U);
   CHECK(board_a_persistence_invariant_holds(&persistence));
 
   CHECK(board_a_persistence_queue_pop(&persistence, &out));
@@ -824,10 +864,11 @@ static int test_ds18b20_csv_payload(void)
   CHECK(board_a_record_format_encode_csv(&record, buffer,
                                          sizeof(buffer) - 1U, &length));
   buffer[length] = 0U;
-  CHECK(buffer[0] == (uint8_t)'3');
+  CHECK(buffer[0] == (uint8_t)'4');
   CHECK(strstr((const char *)buffer,
                ",7,42,230,-160,0,1,5,1,0,6,0,"
-               "4608,4609,4610,1000,2000,3000\n") != NULL);
+               "4608,4609,4610,1000,2000,3000,"
+               "0,0,0,0,0,0,0,0\n") != NULL);
 
   fake_storage_init(&fake);
   ops.context = &fake;
@@ -840,9 +881,62 @@ static int test_ds18b20_csv_payload(void)
   fake.bytes[fake.last_length] = 0U;
   CHECK(strstr((const char *)fake.bytes,
                ",7,42,230,-160,0,1,5,1,0,6,0,"
-               "4608,4609,4610,1000,2000,3000\n") != NULL);
+               "4608,4609,4610,1000,2000,3000,"
+               "0,0,0,0,0,0,0,0\n") != NULL);
 
   record.ds18b20_valid_mask = 0U;
+  CHECK(!board_a_record_format_is_valid(&record));
+  return 0;
+}
+
+static int test_schema4_event_csv_payload(void)
+{
+  board_a_record_format_record_t record = make_record(9U, 0U, 0U);
+  uint8_t buffer[BOARD_A_RECORD_CSV_MAX_BYTES + 1U];
+  size_t length = 0U;
+  uint8_t channel;
+
+  record.source = BOARD_A_DATA_SOURCE_REAL_DS18B20;
+  for (channel = 0U; channel < BOARD_A_RECORD_CHANNEL_COUNT; ++channel) {
+    record.values[channel] = 0U;
+    record.units[channel] = BOARD_A_UNIT_TEMPERATURE_X16;
+    record.qualities[channel] = BOARD_A_QUALITY_UNAVAILABLE;
+  }
+  record.trigger = BOARD_A_SAMPLE_TRIGGER_NONE;
+  record.planned_ms = 1000U;
+  record.actual_ms = 1000U;
+  record.ds18b20_valid_mask = 0x0006U;
+  record.ds18b20_sample_id = 99U;
+  record.ds18b20_temperature_x16[0] = 0;
+  record.ds18b20_temperature_x16[1] = 250;
+  record.ds18b20_temperature_x16[2] = -100;
+  record.ds18b20_quality[0] = BOARD_A_QUALITY_CRC_ERROR;
+  record.ds18b20_quality[1] = BOARD_A_QUALITY_OK;
+  record.ds18b20_quality[2] = BOARD_A_QUALITY_STALE;
+  record.event_id = 7U;
+  record.event_phase = BOARD_A_RECORD_EVENT_PHASE_TRIGGER;
+  record.event_level = BOARD_A_ALARM_WARNING;
+  record.event_reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  record.event_trigger_phase = BOARD_A_ALARM_PHASE_A;
+  record.event_max_delta_x16 = 320;
+  record.event_delta_valid = 1U;
+  record.event_flags = 0x0201U;
+
+  CHECK(board_a_record_format_is_valid(&record));
+  CHECK(board_a_record_format_encode_csv(
+      &record, buffer, sizeof(buffer) - 1U, &length));
+  buffer[length] = 0U;
+  CHECK(buffer[0] == (uint8_t)'4');
+  CHECK(strstr((const char *)buffer,
+               ",9,0,1000,1000,0,0,7,10,15,0,3,"
+               "0,0,0,0,2,2,2,2,0,0,0,0,0,0,0,6,99,"
+               "0,250,-100,3,1,5,0,0,0,0,0,0,0,0,0,"
+               "7,2,2,2,1,320,1,513\n") != NULL);
+
+  record.event_phase = 6U;
+  CHECK(!board_a_record_format_is_valid(&record));
+  record.event_phase = BOARD_A_RECORD_EVENT_PHASE_TRIGGER;
+  record.event_flags = 0x0400U;
   CHECK(!board_a_record_format_is_valid(&record));
   return 0;
 }
@@ -862,6 +956,7 @@ int main(void)
   CHECK(test_queue_requeue_when_full_keeps_old_record() == 0);
   CHECK(test_record_path_capacity_boundaries() == 0);
   CHECK(test_ds18b20_csv_payload() == 0);
+  CHECK(test_schema4_event_csv_payload() == 0);
   puts("PASS test_persistence");
   return 0;
 }

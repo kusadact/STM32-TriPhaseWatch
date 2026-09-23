@@ -515,6 +515,96 @@ static void test_invalid_and_time_regression(void)
   CHECK(!board_a_event_buffer_force_close(&buffer, 0U));
 }
 
+static void test_queue_drop_marks_incomplete(void)
+{
+  board_a_event_buffer_t buffer;
+  board_a_event_buffer_status_t status;
+
+  board_a_event_buffer_init(&buffer);
+  board_a_event_buffer_note_queue_drop(&buffer);
+  board_a_event_buffer_status(&buffer, &status);
+  CHECK(status.event_dropped == 1U);
+  CHECK(status.incomplete);
+  CHECK((status.flags & BOARD_A_EVENT_FLAG_INCOMPLETE) != 0U);
+  board_a_event_buffer_note_queue_drop(&buffer);
+  board_a_event_buffer_status(&buffer, &status);
+  CHECK(status.event_dropped == 2U);
+}
+
+static void test_queue_retain_and_forced_close(void)
+{
+  board_a_event_buffer_t buffer;
+  board_a_event_buffer_status_t status;
+  board_a_event_buffer_record_t record;
+  board_a_event_buffer_record_t last;
+  board_a_sensor_snapshot_t snapshot;
+  board_a_alarm_result_t result;
+  uint32_t index;
+  uint32_t pulled = 0U;
+
+  board_a_event_buffer_init(&buffer);
+  snapshot_init(&snapshot, 1U, 1000000ULL);
+  snapshot_set_all(&snapshot, 400, 400, 400);
+  CHECK(board_a_event_buffer_push_snapshot(&buffer, &snapshot));
+  result = make_result(true, BOARD_A_ALARM_EVENT_RAISED, 41U, 1U, 1000U,
+                       BOARD_A_ALARM_WARNING,
+                       BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH,
+                       BOARD_A_ALARM_PHASE_A);
+  CHECK(board_a_event_buffer_note_alarm_result(&buffer, &result));
+  CHECK(board_a_event_buffer_peek_record(&buffer, &record));
+  board_a_event_buffer_status(&buffer, &status);
+  CHECK(status.queued_records == 1U);
+  CHECK(board_a_event_buffer_pull_record(&buffer, &record));
+
+  for (index = 0U; index < 200U; ++index) {
+    board_a_event_buffer_step(&buffer, 2000U + (uint64_t)index * 1000ULL);
+  }
+  board_a_event_buffer_status(&buffer, &status);
+  CHECK(status.queued_records == BOARD_A_EVENT_BUFFER_OUTPUT_CAPACITY);
+  CHECK(board_a_event_buffer_force_close(&buffer, 300000U));
+  board_a_event_buffer_status(&buffer, &status);
+  CHECK(status.event_dropped >= 1U);
+  CHECK(status.incomplete);
+
+  memset(&last, 0, sizeof(last));
+  while (board_a_event_buffer_pull_record(&buffer, &record)) {
+    last = record;
+    pulled++;
+  }
+  CHECK(pulled == BOARD_A_EVENT_BUFFER_OUTPUT_CAPACITY);
+  CHECK(last.phase == BOARD_A_EVENT_PHASE_CLOSE);
+  CHECK((last.flags & BOARD_A_EVENT_FLAG_INCOMPLETE) != 0U);
+}
+
+static void test_restart_drops_ram_event_state(void)
+{
+  board_a_event_buffer_t buffer;
+  board_a_event_buffer_status_t status;
+  board_a_event_buffer_record_t record;
+  board_a_alarm_result_t result;
+
+  /*
+   * This records the current architectural boundary: an unfinished event
+   * exists only in RAM, so a restart cannot synthesize a persisted CLOSE.
+   */
+  board_a_event_buffer_init(&buffer);
+  result = make_result(true, BOARD_A_ALARM_EVENT_RAISED, 31U, 1U, 0U,
+                       BOARD_A_ALARM_WARNING,
+                       BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH,
+                       BOARD_A_ALARM_PHASE_A);
+  CHECK(board_a_event_buffer_note_alarm_result(&buffer, &result));
+  board_a_event_buffer_status(&buffer, &status);
+  CHECK(status.event_open);
+
+  board_a_event_buffer_init(&buffer);
+  board_a_event_buffer_status(&buffer, &status);
+  CHECK(!status.event_open);
+  CHECK(status.event_id == 0U);
+  CHECK(status.queued_records == 0U);
+  CHECK(status.flags == 0U);
+  CHECK(!board_a_event_buffer_pull_record(&buffer, &record));
+}
+
 int main(void)
 {
   test_pre_boundary_and_short();
@@ -525,6 +615,9 @@ int main(void)
   test_force_close_and_restart();
   test_sample_and_event_id_wrap();
   test_invalid_and_time_regression();
+  test_queue_drop_marks_incomplete();
+  test_queue_retain_and_forced_close();
+  test_restart_drops_ram_event_state();
 
   printf("board_a_event_buffer host tests: %u checks, %u failures\n",
          checks, failures);

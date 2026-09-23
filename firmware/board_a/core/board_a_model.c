@@ -7,7 +7,7 @@
 #define BOARD_A_FIRMWARE_PATCH 0U
 #define BOARD_A_PROTOCOL_VERSION 3U
 
-#define BOARD_A_DEFAULT_PERIOD_SEC 10U
+#define BOARD_A_DEFAULT_PERIOD_SEC 30U
 #define BOARD_A_DEFAULT_CHANNEL_MASK 0x0001U
 #define BOARD_A_DEFAULT_RECORD_COUNT 0U
 #define BOARD_A_DS18B20_CONTRACT_REVISION 2U
@@ -280,6 +280,9 @@ static modbus_result_t execute_command(board_a_model_t *model,
         config.channel_mask = model->active_config.config.channel_mask;
         config.record_count = model->active_config.config.record_count;
         config.alarm = model->active_config.alarm_config;
+        config.event_open = model->event_marker_open;
+        config.event_id = model->event_marker_id;
+        config.event_start_us = model->event_marker_start_us;
         config.sensor_valid_mask = model->sensor_map.valid_mask;
         for (sensor = 0U; sensor < BOARD_A_SENSOR_COUNT; ++sensor) {
           memcpy(config.sensor_roms[sensor],
@@ -307,8 +310,9 @@ static modbus_result_t execute_command(board_a_model_t *model,
       }
 
     case BOARD_A_COMMAND_START:
-      if (model->persistence.storage.drain_state ==
-          BOARD_A_DRAIN_PENDING) {
+      if ((model->persistence.storage.drain_state ==
+           BOARD_A_DRAIN_PENDING) ||
+          model->event_stop_flush_pending) {
         model->stats.device_faults++;
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
                            command_id);
@@ -341,14 +345,15 @@ static modbus_result_t execute_command(board_a_model_t *model,
       model->run_state = BOARD_A_RUN_STOPPED;
       model->start_pending = false;
       model->next_sample_us = 0U;
-      board_a_persistence_request_drain(&model->persistence);
+      model->event_stop_flush_pending = true;
       set_command_status(model, command, BOARD_A_COMMAND_RESULT_ACCEPTED,
                          command_id);
       return MODBUS_RESULT_OK;
 
     case BOARD_A_COMMAND_SINGLE:
-      if (model->persistence.storage.drain_state ==
-          BOARD_A_DRAIN_PENDING) {
+      if ((model->persistence.storage.drain_state ==
+           BOARD_A_DRAIN_PENDING) ||
+          model->event_stop_flush_pending) {
         model->stats.device_faults++;
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
                            command_id);
@@ -401,8 +406,9 @@ static modbus_result_t execute_command(board_a_model_t *model,
       return MODBUS_RESULT_OK;
 
     case BOARD_A_COMMAND_ARM_START:
-      if (model->persistence.storage.drain_state ==
-          BOARD_A_DRAIN_PENDING) {
+      if ((model->persistence.storage.drain_state ==
+           BOARD_A_DRAIN_PENDING) ||
+          model->event_stop_flush_pending) {
         model->stats.device_faults++;
         set_command_status(model, command, BOARD_A_COMMAND_RESULT_REJECTED,
                            command_id);
@@ -1094,8 +1100,14 @@ static modbus_result_t read_input_register(
       *value = (model->persistence.save.state == BOARD_A_SAVE_IDLE) ?
           0U : model->persistence.save.request.config.record_count;
       return MODBUS_RESULT_OK;
-    case 0x00A8:
-    case 0x00A9:
+    case BOARD_A_INPUT_EVENT_DROPPED_HI:
+      *value = word_high16(
+          model->persistence.storage.event_dropped);
+      return MODBUS_RESULT_OK;
+    case BOARD_A_INPUT_EVENT_DROPPED_LO:
+      *value = word_low16(
+          model->persistence.storage.event_dropped);
+      return MODBUS_RESULT_OK;
     case 0x00AA:
     case 0x00AB:
     case 0x00AC:
@@ -1152,6 +1164,11 @@ void board_a_model_init(board_a_model_t *model, uint32_t session_id)
   model->alarm_buzzer_active = false;
   model->data_source = BOARD_A_DATA_SOURCE_TEST;
   model->run_state = BOARD_A_RUN_STOPPED;
+  model->event_stop_flush_pending = false;
+  model->event_marker_open = false;
+  model->event_marker_dirty = false;
+  model->event_marker_id = 0U;
+  model->event_marker_start_us = 0U;
   model->session_id = session_id;
   model->command_register = BOARD_A_COMMAND_NONE;
   model->command_id_hi = 0U;
@@ -1628,9 +1645,9 @@ void board_a_model_tick(board_a_model_t *model, uint64_t now_us)
       (model->records_this_run >=
        model->active_config.config.record_count)) {
     model->run_state = BOARD_A_RUN_STOPPED;
+    model->event_stop_flush_pending = true;
     model->start_pending = false;
     model->next_sample_us = 0U;
-    board_a_persistence_request_drain(&model->persistence);
   }
 }
 
@@ -1657,6 +1674,10 @@ void board_a_model_apply_loaded_config(
   model->active_config.config = model->pending_config;
   model->active_config.alarm_config = model->pending_alarm_config;
   model->active_config.valid = true;
+  model->event_marker_open = config->event_open;
+  model->event_marker_id = config->event_id;
+  model->event_marker_start_us = config->event_start_us;
+  model->event_marker_dirty = false;
   memset(&model->sensor_map, 0, sizeof(model->sensor_map));
   model->sensor_map.valid_mask = config->sensor_valid_mask;
   {
@@ -1704,6 +1725,8 @@ void board_a_model_complete_save(
   }
   if (success == 0) {
     model->stats.persistence_errors++;
+  } else {
+    model->event_marker_dirty = false;
   }
   board_a_persistence_complete_save(&model->persistence, success, error,
                                     raw_error);
@@ -1714,6 +1737,46 @@ int board_a_model_pop_record(
 {
   return (model == NULL) ? 0 :
       board_a_persistence_queue_pop(&model->persistence, record);
+}
+
+board_a_event_enqueue_result_t board_a_model_enqueue_event_record(
+    board_a_model_t *model,
+    const board_a_event_buffer_record_t *event_record)
+{
+  board_a_record_format_record_t record;
+  uint8_t utc_valid = 0U;
+  uint32_t utc_seconds = 0U;
+
+  if ((model == NULL) || (event_record == NULL)) {
+    return BOARD_A_EVENT_ENQUEUE_DROP;
+  }
+
+  if (model->time.time_valid) {
+    if (event_record->time_us >= model->time.utc_anchor_us) {
+      uint64_t event_utc =
+          (uint64_t)model->time.utc_anchor_seconds +
+          ((event_record->time_us - model->time.utc_anchor_us) / 1000000ULL);
+
+      if (event_utc < (uint64_t)BOARD_A_TIME_INVALID_SECONDS) {
+        utc_valid = 1U;
+        utc_seconds = (uint32_t)event_utc;
+      }
+    }
+  }
+
+  if (!board_a_record_format_from_event(
+          event_record, model->session_id, model->active_config.version,
+          model->active_config.config.period_sec,
+          model->active_config.config.channel_mask,
+          model->active_config.config.record_count, utc_valid, utc_seconds,
+          &record)) {
+    board_a_persistence_note_event_drop(&model->persistence);
+    return BOARD_A_EVENT_ENQUEUE_DROP;
+  }
+  if (!board_a_persistence_queue_push_event(&model->persistence, &record)) {
+    return BOARD_A_EVENT_ENQUEUE_RETRY;
+  }
+  return BOARD_A_EVENT_ENQUEUE_OK;
 }
 
 void board_a_model_requeue_record(
@@ -1767,4 +1830,57 @@ void board_a_model_complete_drain(board_a_model_t *model,
   }
   board_a_persistence_complete_drain(&model->persistence, generation,
                                      success);
+}
+
+bool board_a_model_complete_event_stop_flush(board_a_model_t *model)
+{
+  if ((model == NULL) || !model->event_stop_flush_pending) {
+    return false;
+  }
+  model->event_stop_flush_pending = false;
+  board_a_persistence_request_drain(&model->persistence);
+  return true;
+}
+
+bool board_a_model_copy_event_marker(
+    const board_a_model_t *model, bool *open, uint32_t *event_id,
+    uint64_t *event_start_us)
+{
+  if ((model == NULL) || (open == NULL) || (event_id == NULL) ||
+      (event_start_us == NULL)) {
+    return false;
+  }
+  *open = model->event_marker_open;
+  *event_id = model->event_marker_id;
+  *event_start_us = model->event_marker_start_us;
+  return true;
+}
+
+void board_a_model_set_event_marker(
+    board_a_model_t *model, bool open, uint32_t event_id,
+    uint64_t event_start_us)
+{
+  if (model == NULL) {
+    return;
+  }
+  if (open && ((event_id == 0U) || (event_start_us == 0U))) {
+    return;
+  }
+  if (!open) {
+    event_id = 0U;
+    event_start_us = 0U;
+  }
+  if ((model->event_marker_open != open) ||
+      (model->event_marker_id != event_id) ||
+      (model->event_marker_start_us != event_start_us)) {
+    model->event_marker_open = open;
+    model->event_marker_id = event_id;
+    model->event_marker_start_us = event_start_us;
+    model->event_marker_dirty = true;
+  }
+}
+
+bool board_a_model_event_marker_dirty(const board_a_model_t *model)
+{
+  return (model != NULL) && model->event_marker_dirty;
 }

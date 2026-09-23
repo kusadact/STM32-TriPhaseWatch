@@ -141,7 +141,7 @@ static int test_save_failure_and_startup_load(void)
       &model, BOARD_A_CONFIG_LOAD_DEFAULT_NO_RECORD, 0U);
   CHECK(model.persistence.config_load_state ==
         BOARD_A_CONFIG_LOAD_DEFAULT_NO_RECORD);
-  CHECK(model.active_config.config.period_sec == 10U);
+  CHECK(model.active_config.config.period_sec == 30U);
 
   board_a_model_note_config_load(
       &model, BOARD_A_CONFIG_LOAD_DEFAULT_ERROR, 0U);
@@ -268,19 +268,25 @@ static int test_stop_drain_and_finite_stop(void)
   board_a_model_init(&model, 9U);
   CHECK(execute_command(&model, BOARD_A_COMMAND_STOP, 0U, 1000U) ==
         MODBUS_RESULT_OK);
-  CHECK(model.persistence.storage.drain_state == BOARD_A_DRAIN_PENDING);
-  generation = model.persistence.storage.drain_generation;
-  CHECK(generation == 1U);
+  CHECK(model.event_stop_flush_pending);
+  CHECK(model.persistence.storage.drain_state == BOARD_A_DRAIN_NONE);
   CHECK(execute_command(&model, BOARD_A_COMMAND_START, 0U, 2000U) ==
         MODBUS_RESULT_SLAVE_BUSY);
   CHECK(execute_command(&model, BOARD_A_COMMAND_SINGLE, 1U, 2000U) ==
         MODBUS_RESULT_SLAVE_BUSY);
+  CHECK(board_a_model_complete_event_stop_flush(&model));
+  CHECK(!model.event_stop_flush_pending);
+  CHECK(model.persistence.storage.drain_state == BOARD_A_DRAIN_PENDING);
+  generation = model.persistence.storage.drain_generation;
+  CHECK(generation == 1U);
   board_a_model_complete_drain(&model, generation, 1);
   CHECK(model.persistence.storage.drain_state == BOARD_A_DRAIN_DONE);
   CHECK(execute_command(&model, BOARD_A_COMMAND_START, 0U, 3000U) ==
         MODBUS_RESULT_OK);
   CHECK(execute_command(&model, BOARD_A_COMMAND_STOP, 0U, 4000U) ==
         MODBUS_RESULT_OK);
+  CHECK(model.event_stop_flush_pending);
+  CHECK(board_a_model_complete_event_stop_flush(&model));
   generation = model.persistence.storage.drain_generation;
   board_a_model_complete_drain(&model, generation, 0);
   CHECK(model.persistence.storage.drain_state == BOARD_A_DRAIN_FAILED);
@@ -294,6 +300,9 @@ static int test_stop_drain_and_finite_stop(void)
   board_a_model_tick(&model, 0U);
   board_a_model_tick(&model, 10000000U);
   CHECK(model.run_state == BOARD_A_RUN_STOPPED);
+  CHECK(model.event_stop_flush_pending);
+  CHECK(model.persistence.storage.drain_state == BOARD_A_DRAIN_NONE);
+  CHECK(board_a_model_complete_event_stop_flush(&model));
   CHECK(model.persistence.storage.drain_state == BOARD_A_DRAIN_PENDING);
   CHECK(model.persistence.storage.drain_generation == 1U);
   CHECK(board_a_persistence_invariant_holds(&model.persistence));
@@ -446,6 +455,115 @@ static int test_real_ds18b20_not_present_record(void)
   return 0;
 }
 
+static int test_event_record_enqueue_and_drop_accounting(void)
+{
+  board_a_model_t model;
+  board_a_event_buffer_record_t event_record;
+  board_a_record_format_record_t record;
+  board_a_persistence_status_t status;
+  uint32_t index;
+
+  memset(&event_record, 0, sizeof(event_record));
+  event_record.event_id = 7U;
+  event_record.phase = BOARD_A_EVENT_PHASE_TRIGGER;
+  event_record.sample_id = 42U;
+  event_record.time_ms = 1000U;
+  event_record.valid_mask = 0x0007U;
+  event_record.temperature_x16[0] = 400;
+  event_record.temperature_x16[1] = 416;
+  event_record.temperature_x16[2] = 432;
+  event_record.quality[0] = BOARD_A_QUALITY_OK;
+  event_record.quality[1] = BOARD_A_QUALITY_OK;
+  event_record.quality[2] = BOARD_A_QUALITY_OK;
+  event_record.delta_valid = true;
+  event_record.delta_x16 = 32;
+  event_record.level = BOARD_A_ALARM_WARNING;
+  event_record.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  event_record.alarm_phase = BOARD_A_ALARM_PHASE_A;
+  event_record.flags = BOARD_A_EVENT_FLAG_PRE_WRAPPED;
+
+  board_a_model_init(&model, 0x12345678U);
+  model.active_config.version = 0x12345678U;
+  CHECK(board_a_model_enqueue_event_record(&model, &event_record) ==
+        BOARD_A_EVENT_ENQUEUE_OK);
+  CHECK(board_a_model_pop_record(&model, &record));
+  CHECK(record.session_id == 0x12345678U);
+  CHECK(record.config_version == 0x12345678U);
+  CHECK(record.sequence == 42U);
+  CHECK(record.trigger == BOARD_A_SAMPLE_TRIGGER_NONE);
+  CHECK(record.planned_ms == 1000U);
+  CHECK(record.actual_ms == 1000U);
+  CHECK(record.source == BOARD_A_DATA_SOURCE_REAL_DS18B20);
+  CHECK(record.ds18b20_sample_id == 42U);
+  CHECK(record.ds18b20_error[0] == 0U);
+  CHECK(record.ds18b20_rom_short[0] == 0U);
+  CHECK(record.ds18b20_sample_time_ms[0] == 0U);
+  CHECK(record.event_id == 7U);
+  CHECK(record.event_phase == BOARD_A_RECORD_EVENT_PHASE_TRIGGER);
+  CHECK(record.event_level == BOARD_A_ALARM_WARNING);
+  CHECK(record.event_reason == BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH);
+  CHECK(record.event_trigger_phase == BOARD_A_ALARM_PHASE_A);
+  CHECK(record.event_max_delta_x16 == 32);
+  CHECK(record.event_delta_valid == 1U);
+  CHECK(record.event_flags == BOARD_A_EVENT_FLAG_PRE_WRAPPED);
+  board_a_model_complete_record(
+      &model, &record, BOARD_A_RECORD_COMPLETE_SYNCED);
+
+  for (index = 0U; index < BOARD_A_RECORD_QUEUE_CAPACITY; ++index) {
+    CHECK(board_a_model_enqueue_event_record(&model, &event_record) ==
+          BOARD_A_EVENT_ENQUEUE_OK);
+  }
+  CHECK(board_a_model_enqueue_event_record(&model, &event_record) ==
+        BOARD_A_EVENT_ENQUEUE_RETRY);
+  CHECK(model.persistence.storage.event_dropped == 0U);
+  CHECK(model.persistence.storage.dropped == 0U);
+  event_record.valid_mask = 0x0008U;
+  CHECK(board_a_model_enqueue_event_record(&model, &event_record) ==
+        BOARD_A_EVENT_ENQUEUE_DROP);
+  CHECK(model.persistence.storage.event_dropped == 1U);
+  CHECK(model.persistence.storage.dropped == 0U);
+  CHECK(board_a_persistence_invariant_holds(&model.persistence));
+  board_a_persistence_status(&model.persistence,
+                             model.active_config.version, &status);
+  CHECK(status.event_dropped == 1U);
+  CHECK(status.dropped == 0U);
+  return 0;
+}
+
+static int test_event_utc_precision(void)
+{
+  board_a_model_t model;
+  board_a_record_format_record_t record;
+  board_a_event_buffer_record_t event_record;
+
+  board_a_model_init(&model, 0x55U);
+  model.time.time_valid = true;
+  model.time.utc_anchor_seconds = 1000U;
+  model.time.utc_anchor_us = 1999999ULL;
+  memset(&event_record, 0, sizeof(event_record));
+  event_record.event_id = 8U;
+  event_record.phase = BOARD_A_EVENT_PHASE_ACTIVE;
+  event_record.sample_id = 3U;
+  event_record.time_us = 2999000ULL;
+  event_record.time_ms = 2999U;
+  event_record.valid_mask = 0x0007U;
+  event_record.temperature_x16[0] = 400;
+  event_record.temperature_x16[1] = 401;
+  event_record.temperature_x16[2] = 402;
+  event_record.quality[0] = BOARD_A_QUALITY_OK;
+  event_record.quality[1] = BOARD_A_QUALITY_OK;
+  event_record.quality[2] = BOARD_A_QUALITY_OK;
+  event_record.level = BOARD_A_ALARM_WARNING;
+  event_record.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  event_record.alarm_phase = BOARD_A_ALARM_PHASE_A;
+  CHECK(board_a_model_enqueue_event_record(&model, &event_record) ==
+        BOARD_A_EVENT_ENQUEUE_OK);
+  CHECK(board_a_model_pop_record(&model, &record));
+  CHECK(record.utc_valid == 1U);
+  CHECK(record.utc_seconds == 1000U);
+  return 0;
+}
+
 int main(void)
 {
   CHECK(test_save_mailbox_capture_and_busy() == 0);
@@ -457,6 +575,8 @@ int main(void)
   CHECK(test_extended_status_block() == 0);
   CHECK(test_real_ds18b20_record_and_register_link() == 0);
   CHECK(test_real_ds18b20_not_present_record() == 0);
+  CHECK(test_event_record_enqueue_and_drop_accounting() == 0);
+  CHECK(test_event_utc_precision() == 0);
   puts("PASS test_model_persistence");
   return 0;
 }

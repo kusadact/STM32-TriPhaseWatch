@@ -265,7 +265,7 @@ static void test_normal_reads(void)
   board_a_slave_init(&slave, 0x00000001U);
   CHECK(read_registers(&slave, 0x03U, BOARD_A_HOLDING_CFG_PERIOD_SEC,
                        3U, values));
-  CHECK(values[0] == 10U);
+  CHECK(values[0] == 30U);
   CHECK(values[1] == 0x0001U);
   CHECK(values[2] == 0U);
 

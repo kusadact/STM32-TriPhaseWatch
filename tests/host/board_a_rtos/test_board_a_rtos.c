@@ -136,6 +136,7 @@ static bool runtime_finish_drain(board_a_runtime_t *runtime)
 {
   board_a_persistence_status_t status;
 
+  (void)board_a_runtime_complete_event_stop_flush(runtime);
   return board_a_runtime_persistence_status(runtime, &status) &&
          (status.drain_state == BOARD_A_DRAIN_PENDING) &&
          (board_a_runtime_complete_drain(runtime, status.drain_generation,
@@ -669,7 +670,7 @@ static void test_t02_armed_start_waits_for_target(void)
   CHECK(!status.schedule_armed);
   CHECK(status.sequence == 1U);
   CHECK(status.records_this_run == 1U);
-  CHECK(status.next_sample_us == P3B_ANCHOR_US + 15000000ULL);
+  CHECK(status.next_sample_us == P3B_ANCHOR_US + 35000000ULL);
   CHECK(status.schedule_start_count == 1U);
   CHECK(status.schedule_start_late_us == 0U);
   CHECK(runtime_read_u16(&runtime, 0x04U, BOARD_A_INPUT_SCHEDULE_STATE,
@@ -734,7 +735,7 @@ static void test_t03b_armed_start_cancels(void)
   CHECK(board_a_runtime_copy_status(&runtime, &status));
   CHECK(status.sequence == 1U);
   CHECK(status.records_this_run == 1U);
-  CHECK(status.next_sample_us == P3B_ANCHOR_US + 11000000ULL);
+  CHECK(status.next_sample_us == P3B_ANCHOR_US + 31000000ULL);
 
   /* The cancelled target must not inject a second start or record. */
   board_a_runtime_tick(&runtime, P3B_ANCHOR_US + 5000000ULL);
@@ -912,7 +913,7 @@ static void test_t04_set_time_rules(void)
     CHECK(status.run_state == BOARD_A_RUN_RUNNING);
     CHECK(status.records_this_run == 1U);
     next_sample_us = status.next_sample_us;
-    CHECK(next_sample_us == P3B_ANCHOR_US + 10000000ULL);
+    CHECK(next_sample_us == P3B_ANCHOR_US + 30000000ULL);
 
     /* A running time jump re-anchors UTC but keeps the monotonic deadline. */
     context.now_us = P3B_ANCHOR_US + 1000000ULL;
@@ -961,7 +962,7 @@ static void test_t05_wake_crossing_starts_once(void)
   CHECK(status.sequence == 1U);
   CHECK(status.records_this_run == 1U);
   CHECK(status.stats.scheduler_missed == 0U);
-  CHECK(status.next_sample_us == late_us + 10000000ULL);
+  CHECK(status.next_sample_us == late_us + 30000000ULL);
   CHECK(status.schedule_start_count == 1U);
   CHECK(status.schedule_start_late_us == 30000000U);
 
@@ -973,7 +974,7 @@ static void test_t05_wake_crossing_starts_once(void)
   CHECK(status.schedule_start_count == 1U);
 
   /* The next periodic record arrives at the re-phased deadline only. */
-  board_a_runtime_tick(&runtime, late_us + 10000000ULL);
+  board_a_runtime_tick(&runtime, late_us + 30000000ULL);
   CHECK(board_a_runtime_copy_status(&runtime, &status));
   CHECK(status.sequence == 2U);
   CHECK(status.records_this_run == 2U);
@@ -1285,6 +1286,194 @@ static void test_concurrent_snapshot_and_commands(void)
   pthread_mutex_destroy(&context.mutex);
 }
 
+static void test_runtime_event_drain_and_queue_drop(void)
+{
+  fake_lock_t context;
+  board_a_runtime_t runtime;
+  board_a_event_buffer_t event_buffer;
+  board_a_event_buffer_status_t event_status;
+  board_a_sensor_snapshot_t snapshot;
+  board_a_alarm_result_t result;
+  board_a_event_buffer_record_t event_record;
+  board_a_record_format_record_t record;
+  uint32_t index;
+  bool saw_pre;
+  bool saw_trigger;
+
+  memset(&context, 0, sizeof(context));
+  CHECK(pthread_mutex_init(&context.mutex, NULL) == 0);
+  board_a_runtime_init(&runtime, 0x01020304U, &FAKE_OPS, &context);
+  board_a_event_buffer_init(&event_buffer);
+
+  memset(&snapshot, 0, sizeof(snapshot));
+  snapshot.sample_id = 1U;
+  snapshot.sample_time_us = 1000000U;
+  snapshot.valid_mask = 0x0007U;
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    snapshot.sensors[index].sensor_id = (uint8_t)index;
+    snapshot.sensors[index].sensor_type = BOARD_A_SENSOR_TYPE_DS18B20;
+    snapshot.sensors[index].has_value = true;
+    snapshot.sensors[index].quality = BOARD_A_QUALITY_OK;
+    snapshot.sensors[index].temperature_x16 = (int16_t)(400U + index);
+  }
+  CHECK(board_a_event_buffer_push_snapshot(&event_buffer, &snapshot));
+
+  memset(&result, 0, sizeof(result));
+  result.event = true;
+  result.event_type = BOARD_A_ALARM_EVENT_RAISED;
+  result.event_id = 7U;
+  result.state.valid = true;
+  result.state.sample_id = 1U;
+  result.state.sample_time_ms = 2000U;
+  result.state.display_mask = 0x0007U;
+  result.state.comparison_mask = 0x0007U;
+  result.state.temperature_x16[0] = 400;
+  result.state.temperature_x16[1] = 401;
+  result.state.temperature_x16[2] = 402;
+  result.state.quality[0] = BOARD_A_QUALITY_OK;
+  result.state.quality[1] = BOARD_A_QUALITY_OK;
+  result.state.quality[2] = BOARD_A_QUALITY_OK;
+  result.state.delta_valid = true;
+  result.state.maximum_delta_x16 = 2;
+  result.state.trigger_phase = BOARD_A_ALARM_PHASE_A;
+  result.state.level = BOARD_A_ALARM_WARNING;
+  result.state.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  CHECK(board_a_event_buffer_note_alarm_result(&event_buffer, &result));
+  CHECK(board_a_runtime_drain_event_records(&runtime, &event_buffer) > 0U);
+  saw_pre = false;
+  saw_trigger = false;
+  while (board_a_runtime_pop_record(&runtime, &record)) {
+    if (record.event_phase == BOARD_A_RECORD_EVENT_PHASE_PRE) {
+      saw_pre = true;
+    }
+    if (record.event_phase == BOARD_A_RECORD_EVENT_PHASE_TRIGGER) {
+      saw_trigger = true;
+    }
+    CHECK(record.event_id == 7U);
+    CHECK(record.session_id == 0x01020304U);
+    board_a_runtime_complete_record(
+        &runtime, &record, BOARD_A_RECORD_COMPLETE_SYNCED);
+  }
+  CHECK(saw_pre);
+  CHECK(saw_trigger);
+
+  CHECK(board_a_event_buffer_force_close(&event_buffer, 3000U));
+  CHECK(board_a_runtime_drain_event_records(&runtime, &event_buffer) == 1U);
+  CHECK(board_a_runtime_pop_record(&runtime, &record));
+  CHECK(record.event_phase == BOARD_A_RECORD_EVENT_PHASE_CLOSE);
+  CHECK((record.event_flags & BOARD_A_EVENT_FLAG_FORCED_CLOSE) != 0U);
+  CHECK((record.event_flags & BOARD_A_EVENT_FLAG_INCOMPLETE) != 0U);
+  board_a_runtime_complete_record(
+      &runtime, &record, BOARD_A_RECORD_COMPLETE_SYNCED);
+
+  memset(&event_record, 0, sizeof(event_record));
+  event_record.event_id = 99U;
+  event_record.phase = BOARD_A_EVENT_PHASE_TRIGGER;
+  event_record.sample_id = 99U;
+  event_record.time_ms = 5000U;
+  event_record.valid_mask = 0x0007U;
+  event_record.temperature_x16[0] = 500;
+  event_record.temperature_x16[1] = 501;
+  event_record.temperature_x16[2] = 502;
+  event_record.quality[0] = BOARD_A_QUALITY_OK;
+  event_record.quality[1] = BOARD_A_QUALITY_OK;
+  event_record.quality[2] = BOARD_A_QUALITY_OK;
+  event_record.level = BOARD_A_ALARM_WARNING;
+  event_record.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  event_record.alarm_phase = BOARD_A_ALARM_PHASE_A;
+  for (index = 0U; index < BOARD_A_RECORD_QUEUE_CAPACITY; ++index) {
+    CHECK(board_a_runtime_enqueue_event_record(&runtime, &event_record));
+  }
+
+  memset(&snapshot, 0, sizeof(snapshot));
+  snapshot.sample_id = 2U;
+  snapshot.sample_time_us = 2000000U;
+  snapshot.valid_mask = 0x0007U;
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    snapshot.sensors[index].sensor_id = (uint8_t)index;
+    snapshot.sensors[index].sensor_type = BOARD_A_SENSOR_TYPE_DS18B20;
+    snapshot.sensors[index].has_value = true;
+    snapshot.sensors[index].quality = BOARD_A_QUALITY_OK;
+    snapshot.sensors[index].temperature_x16 = (int16_t)(410U + index);
+  }
+  CHECK(board_a_event_buffer_push_snapshot(&event_buffer, &snapshot));
+  result.event_id = 8U;
+  result.state.sample_id = 2U;
+  result.state.sample_time_ms = 4000U;
+  CHECK(board_a_event_buffer_note_alarm_result(&event_buffer, &result));
+  CHECK(board_a_runtime_drain_event_records(&runtime, &event_buffer) == 0U);
+  board_a_event_buffer_status(&event_buffer, &event_status);
+  CHECK(event_status.event_dropped == 0U);
+  CHECK(event_status.queue_full_count >= 1U);
+  CHECK(event_status.incomplete);
+
+  pthread_mutex_destroy(&context.mutex);
+}
+
+static void test_runtime_stop_flush_gate(void)
+{
+  fake_lock_t context;
+  board_a_runtime_t runtime;
+  board_a_runtime_status_t status;
+  board_a_persistence_status_t persistence;
+
+  p3b_runtime_setup(&runtime, &context, 0x20U);
+  CHECK(runtime_command(&runtime, BOARD_A_COMMAND_START));
+  CHECK(runtime_command(&runtime, BOARD_A_COMMAND_STOP));
+  CHECK(board_a_runtime_copy_status(&runtime, &status));
+  CHECK(status.event_stop_flush_pending);
+  CHECK(board_a_runtime_persistence_status(&runtime, &persistence));
+  CHECK(persistence.drain_state == BOARD_A_DRAIN_NONE);
+  CHECK(!runtime_command(&runtime, BOARD_A_COMMAND_START));
+  CHECK(board_a_runtime_complete_event_stop_flush(&runtime));
+  CHECK(!board_a_runtime_complete_event_stop_flush(&runtime));
+  CHECK(board_a_runtime_persistence_status(&runtime, &persistence));
+  CHECK(persistence.drain_state == BOARD_A_DRAIN_PENDING);
+  CHECK(runtime_finish_drain(&runtime));
+  pthread_mutex_destroy(&context.mutex);
+}
+
+static void test_event_marker_recovery(void)
+{
+  fake_lock_t context;
+  board_a_runtime_t runtime;
+  board_a_record_format_record_t record;
+  bool marker_open = false;
+  uint32_t marker_id = 0U;
+  uint64_t marker_start_us = 0U;
+
+  p3b_runtime_setup(&runtime, &context, 19U);
+  board_a_runtime_set_event_marker(
+      &runtime, true, 42U, 123456789ULL);
+  CHECK(board_a_runtime_event_marker_dirty(&runtime));
+  CHECK(board_a_runtime_copy_event_marker(
+      &runtime, &marker_open, &marker_id, &marker_start_us));
+  CHECK(marker_open);
+  CHECK(marker_id == 42U);
+  CHECK(marker_start_us == 123456789ULL);
+
+  CHECK(board_a_runtime_recover_incomplete_event(&runtime));
+  CHECK(board_a_runtime_copy_event_marker(
+      &runtime, &marker_open, &marker_id, &marker_start_us));
+  CHECK(!marker_open);
+  CHECK(marker_id == 0U);
+  CHECK(marker_start_us == 0U);
+  CHECK(board_a_runtime_pop_record(&runtime, &record));
+  CHECK(record.event_id == 42U);
+  CHECK(record.event_phase == BOARD_A_RECORD_EVENT_PHASE_CLOSE);
+  CHECK(record.planned_ms == 123456U);
+  CHECK((record.event_flags & BOARD_A_EVENT_FLAG_INCOMPLETE) != 0U);
+  CHECK((record.event_flags & BOARD_A_EVENT_FLAG_FORCED_CLOSE) != 0U);
+
+  CHECK(board_a_runtime_request_event_marker_save(&runtime, 1U));
+  CHECK(board_a_runtime_event_marker_dirty(&runtime));
+  board_a_runtime_complete_save(
+      &runtime, 1, BOARD_A_SAVE_ERROR_NONE, 0U);
+  CHECK(!board_a_runtime_event_marker_dirty(&runtime));
+
+  pthread_mutex_destroy(&context.mutex);
+}
+
 int main(void)
 {
   test_monotonic_wrap();
@@ -1306,7 +1495,10 @@ int main(void)
   test_t07_protocol_version_and_commands();
   test_t08_word_encoding_and_boundaries();
   test_alarm_ack_request_take();
+  test_event_marker_recovery();
   test_concurrent_snapshot_and_commands();
+  test_runtime_event_drain_and_queue_drop();
+  test_runtime_stop_flush_gate();
 
   printf("board_a RTOS host tests: %u checks, %u failures\n",
          g_checks, g_failures);

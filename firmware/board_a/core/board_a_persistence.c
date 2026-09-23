@@ -120,6 +120,28 @@ int board_a_persistence_queue_push(
   return 1;
 }
 
+int board_a_persistence_queue_push_event(
+    board_a_persistence_t *persistence,
+    const board_a_record_format_record_t *record)
+{
+  if ((persistence == NULL) || (record == NULL) ||
+      !board_a_record_format_is_valid(record)) {
+    return 0;
+  }
+  if (persistence->storage.count >= BOARD_A_RECORD_QUEUE_CAPACITY) {
+    return 0;
+  }
+  return board_a_persistence_queue_push(persistence, record);
+}
+
+void board_a_persistence_note_event_drop(
+    board_a_persistence_t *persistence)
+{
+  if (persistence != NULL) {
+    persistence->storage.event_dropped++;
+  }
+}
+
 int board_a_persistence_queue_pop(
     board_a_persistence_t *persistence,
     board_a_record_format_record_t *record)
@@ -276,6 +298,7 @@ void board_a_persistence_status(
   status->generated = storage->generated;
   status->synced = storage->synced;
   status->dropped = storage->dropped;
+  status->event_dropped = storage->event_dropped;
   status->uncertain = storage->uncertain;
   status->in_flight = storage->in_flight;
   status->drain_state = (uint16_t)storage->drain_state;

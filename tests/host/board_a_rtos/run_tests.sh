@@ -25,6 +25,7 @@ mkdir -p "$BUILD_DIR"
   "$CORE_DIR/board_a_log_schedule.c" \
   "$CORE_DIR/board_a_persistence.c" \
   "$CORE_DIR/board_a_record_format.c" \
+  "$CORE_DIR/board_a_event_buffer.c" \
   "$SENSOR_DIR/ds18b20.c" \
   "$ALARM_DIR/board_a_alarm.c" \
   "$CORE_DIR/board_a_model.c" \

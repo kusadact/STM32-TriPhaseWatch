@@ -474,6 +474,7 @@ static void after_activity(void)
 {
   g_now_us += g_time_step_us;
   board_a_runtime_tick(&g_runtime, g_now_us);
+  (void)board_a_runtime_complete_event_stop_flush(&g_runtime);
   pump_save();
   pump_storage();
 }
@@ -619,6 +620,7 @@ static int handle_tick(void)
   }
   g_now_us = read_u64_be(now_bytes);
   board_a_runtime_tick(&g_runtime, g_now_us);
+  (void)board_a_runtime_complete_event_stop_flush(&g_runtime);
   pump_save();
   pump_storage();
   return write_exact(&acknowledgement, 1U) < 0 ? -1 : 0;

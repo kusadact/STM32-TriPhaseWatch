@@ -66,6 +66,7 @@ typedef struct {
 typedef struct {
   bool valid;
   uint32_t sample_id;
+  uint64_t sample_time_us;
   uint64_t sample_time_ms;
   uint16_t display_mask;
   uint16_t comparison_mask;

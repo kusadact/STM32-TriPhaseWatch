@@ -63,6 +63,7 @@ static void record_apply_alarm_state(
   uint8_t phase;
 
   record->sample_id = state->sample_id;
+  record->time_us = state->sample_time_us;
   record->time_ms = state->sample_time_ms;
   record->valid_mask = state->display_mask;
   for (phase = 0U; phase < BOARD_A_ALARM_PHASE_COUNT; ++phase) {
@@ -99,6 +100,7 @@ static board_a_event_buffer_record_t record_from_snapshot(
   record.event_id = 0U;
   record.phase = BOARD_A_EVENT_PHASE_PRE;
   record.sample_id = snapshot->sample_id;
+  record.time_us = snapshot->sample_time_us;
   record.time_ms = snapshot->sample_time_us / 1000ULL;
   record.level = buffer->current_level;
   record.reason = buffer->current_reason;
@@ -153,6 +155,7 @@ static void record_from_latest(const board_a_event_buffer_t *buffer,
   } else {
     memset(record, 0, sizeof(*record));
     record->time_ms = 0U;
+    record->time_us = 0U;
     record->level = buffer->current_level;
     record->reason = buffer->current_reason;
     record->alarm_phase = buffer->current_alarm_phase;
@@ -194,6 +197,28 @@ static bool queue_record(board_a_event_buffer_t *buffer,
   buffer->output[tail].flags |= buffer->event_flags;
   buffer->output_count++;
   return true;
+}
+
+static bool queue_record_force(board_a_event_buffer_t *buffer,
+                               const board_a_event_buffer_record_t *record)
+{
+  if (buffer->output_count < BOARD_A_EVENT_BUFFER_OUTPUT_CAPACITY) {
+    return queue_record(buffer, record);
+  }
+
+  /*
+   * Preserve the terminal CLOSE row by sacrificing the oldest queued row.
+   * The drop is explicit so the event cannot appear complete.
+   */
+  buffer->output_head =
+      (uint16_t)((buffer->output_head + 1U) %
+                 BOARD_A_EVENT_BUFFER_OUTPUT_CAPACITY);
+  buffer->output_count--;
+  buffer->queue_full_count++;
+  buffer->event_dropped++;
+  buffer->incomplete = true;
+  buffer->event_flags |= BOARD_A_EVENT_FLAG_INCOMPLETE;
+  return queue_record(buffer, record);
 }
 
 static board_a_event_buffer_record_t ring_record_at(
@@ -300,6 +325,7 @@ static bool start_event(board_a_event_buffer_t *buffer,
   buffer->event_open = true;
   buffer->run_phase = BOARD_A_EVENT_RUN_ACTIVE;
   buffer->event_id = result->event_id;
+  buffer->event_start_us = trigger.time_us;
   buffer->event_start_ms = trigger.time_ms;
   buffer->active_next_ms = add_ms_saturated(
       trigger.time_ms, BOARD_A_EVENT_BUFFER_ACTIVE_PERIOD_MS);
@@ -353,7 +379,7 @@ static bool start_event(board_a_event_buffer_t *buffer,
 
   trigger = make_event_record(buffer, &trigger, BOARD_A_EVENT_PHASE_TRIGGER,
                               0U);
-  if (queue_record(buffer, &trigger)) {
+  if (queue_record_force(buffer, &trigger)) {
     note_emitted_sample(buffer, &trigger);
   }
   buffer->pending_flags = 0U;
@@ -411,6 +437,7 @@ static void close_event(board_a_event_buffer_t *buffer, uint64_t now_ms,
   record_from_latest(buffer, &close_record);
   close_record.event_id = buffer->event_id;
   close_record.phase = BOARD_A_EVENT_PHASE_CLOSE;
+  close_record.time_us = now_ms * 1000ULL;
   close_record.time_ms = now_ms;
   close_record.level = buffer->current_level;
   close_record.reason = buffer->current_reason;
@@ -422,7 +449,7 @@ static void close_event(board_a_event_buffer_t *buffer, uint64_t now_ms,
         BOARD_A_EVENT_FLAG_FORCED_CLOSE;
     close_record.flags = buffer->event_flags | buffer->pending_flags;
   }
-  (void)queue_record(buffer, &close_record);
+  (void)queue_record_force(buffer, &close_record);
   buffer->pending_flags = 0U;
   buffer->event_open = false;
   buffer->run_phase = BOARD_A_EVENT_RUN_IDLE;
@@ -574,9 +601,7 @@ void board_a_event_buffer_step(board_a_event_buffer_t *buffer,
   if (buffer->run_phase == BOARD_A_EVENT_RUN_POST) {
     if (now_ms >= buffer->post_end_ms) {
       emit_active_or_post(buffer, buffer->post_end_ms);
-      if (buffer->output_count < BOARD_A_EVENT_BUFFER_OUTPUT_CAPACITY) {
-        close_event(buffer, buffer->post_end_ms, false);
-      }
+      close_event(buffer, buffer->post_end_ms, false);
       return;
     }
   }
@@ -592,11 +617,35 @@ bool board_a_event_buffer_pull_record(
   }
 
   *record = buffer->output[buffer->output_head];
+  record->flags |= buffer->event_flags;
   buffer->output_head =
       (uint16_t)((buffer->output_head + 1U) %
                  BOARD_A_EVENT_BUFFER_OUTPUT_CAPACITY);
   buffer->output_count--;
   return true;
+}
+
+bool board_a_event_buffer_peek_record(
+    const board_a_event_buffer_t *buffer,
+    board_a_event_buffer_record_t *record)
+{
+  if ((buffer == NULL) || (record == NULL) || (buffer->output_count == 0U)) {
+    return false;
+  }
+
+  *record = buffer->output[buffer->output_head];
+  record->flags |= buffer->event_flags;
+  return true;
+}
+
+void board_a_event_buffer_note_queue_full(board_a_event_buffer_t *buffer)
+{
+  if (buffer == NULL) {
+    return;
+  }
+  buffer->queue_full_count++;
+  buffer->incomplete = true;
+  buffer->event_flags |= BOARD_A_EVENT_FLAG_INCOMPLETE;
 }
 
 bool board_a_event_buffer_force_close(board_a_event_buffer_t *buffer,
@@ -607,6 +656,16 @@ bool board_a_event_buffer_force_close(board_a_event_buffer_t *buffer,
   }
   close_event(buffer, now_ms, true);
   return true;
+}
+
+void board_a_event_buffer_note_queue_drop(board_a_event_buffer_t *buffer)
+{
+  if (buffer == NULL) {
+    return;
+  }
+  buffer->event_dropped++;
+  buffer->incomplete = true;
+  buffer->event_flags |= BOARD_A_EVENT_FLAG_INCOMPLETE;
 }
 
 void board_a_event_buffer_status(
@@ -620,6 +679,7 @@ void board_a_event_buffer_status(
   memset(status, 0, sizeof(*status));
   status->event_open = buffer->event_open;
   status->event_id = buffer->event_id;
+  status->event_start_us = buffer->event_start_us;
   if (buffer->event_open) {
     status->pre_available = buffer->pre_available;
     status->pre_exported = buffer->pre_exported;
@@ -642,6 +702,7 @@ void board_a_event_buffer_status(
   }
   status->queued_records = buffer->output_count;
   status->queue_full_count = buffer->queue_full_count;
+  status->event_dropped = buffer->event_dropped;
   status->incomplete = buffer->incomplete;
   status->flags = buffer->event_flags;
 }

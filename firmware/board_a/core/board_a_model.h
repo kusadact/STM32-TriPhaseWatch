@@ -170,7 +170,9 @@ enum {
   BOARD_A_INPUT_CAPTURED_PERIOD_HI = 0x00A4,
   BOARD_A_INPUT_CAPTURED_PERIOD_LO = 0x00A5,
   BOARD_A_INPUT_CAPTURED_MASK = 0x00A6,
-  BOARD_A_INPUT_CAPTURED_COUNT = 0x00A7
+  BOARD_A_INPUT_CAPTURED_COUNT = 0x00A7,
+  BOARD_A_INPUT_EVENT_DROPPED_HI = 0x00A8,
+  BOARD_A_INPUT_EVENT_DROPPED_LO = 0x00A9
 };
 
 /*
@@ -369,6 +371,11 @@ typedef struct {
   board_a_snapshot_t snapshot;
   uint16_t data_source;
   board_a_run_state_t run_state;
+  bool event_stop_flush_pending;
+  bool event_marker_open;
+  bool event_marker_dirty;
+  uint32_t event_marker_id;
+  uint64_t event_marker_start_us;
   uint32_t session_id;
   uint16_t command_register;
   uint16_t command_id_hi;
@@ -398,6 +405,12 @@ typedef struct {
   board_a_persistence_t persistence;
   board_a_model_stats_t stats;
 } board_a_model_t;
+
+typedef enum {
+  BOARD_A_EVENT_ENQUEUE_DROP = -1,
+  BOARD_A_EVENT_ENQUEUE_RETRY = 0,
+  BOARD_A_EVENT_ENQUEUE_OK = 1
+} board_a_event_enqueue_result_t;
 
 void board_a_model_init(board_a_model_t *model, uint32_t session_id);
 
@@ -467,6 +480,10 @@ void board_a_model_complete_save(
 int board_a_model_pop_record(
     board_a_model_t *model, board_a_record_format_record_t *record);
 
+board_a_event_enqueue_result_t board_a_model_enqueue_event_record(
+    board_a_model_t *model,
+    const board_a_event_buffer_record_t *event_record);
+
 void board_a_model_requeue_record(
     board_a_model_t *model,
     const board_a_record_format_record_t *record);
@@ -486,5 +503,17 @@ void board_a_model_note_storage_error(
 
 void board_a_model_complete_drain(board_a_model_t *model,
                                   uint32_t generation, int success);
+
+bool board_a_model_complete_event_stop_flush(board_a_model_t *model);
+
+bool board_a_model_copy_event_marker(
+    const board_a_model_t *model, bool *open, uint32_t *event_id,
+    uint64_t *event_start_us);
+
+void board_a_model_set_event_marker(
+    board_a_model_t *model, bool open, uint32_t event_id,
+    uint64_t event_start_us);
+
+bool board_a_model_event_marker_dirty(const board_a_model_t *model);
 
 #endif /* BOARD_A_MODEL_H */

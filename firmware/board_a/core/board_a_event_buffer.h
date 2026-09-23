@@ -30,6 +30,8 @@ typedef enum {
   BOARD_A_EVENT_PHASE_CLOSE = 4
 } board_a_event_phase_t;
 
+#define BOARD_A_EVENT_FLAG_KNOWN_MASK 0x03FFU
+
 typedef enum {
   BOARD_A_EVENT_FLAG_PRE_SHORT = 1U << 0,
   BOARD_A_EVENT_FLAG_PRE_WRAPPED = 1U << 1,
@@ -47,6 +49,7 @@ typedef struct {
   uint32_t event_id;
   board_a_event_phase_t phase;
   uint32_t sample_id;
+  uint64_t time_us;
   uint64_t time_ms;
   uint16_t valid_mask;
   int16_t temperature_x16[BOARD_A_ALARM_PHASE_COUNT];
@@ -62,6 +65,7 @@ typedef struct {
 typedef struct {
   bool event_open;
   uint32_t event_id;
+  uint64_t event_start_us;
   uint16_t pre_available;
   uint16_t pre_exported;
   uint64_t pre_span_ms;
@@ -73,6 +77,7 @@ typedef struct {
    * step retries an unadvanced tick after the caller drains the queue.
    */
   uint32_t queue_full_count;
+  uint32_t event_dropped;
   bool incomplete;
   uint16_t flags;
 } board_a_event_buffer_status_t;
@@ -95,6 +100,7 @@ typedef struct {
   bool event_open;
   uint8_t run_phase;
   uint32_t event_id;
+  uint64_t event_start_us;
   uint64_t event_start_ms;
   uint64_t active_next_ms;
   uint64_t post_start_ms;
@@ -113,6 +119,7 @@ typedef struct {
   uint16_t event_flags;
   uint16_t pending_flags;
   uint32_t queue_full_count;
+  uint32_t event_dropped;
 
   board_a_event_buffer_record_t output[
       BOARD_A_EVENT_BUFFER_OUTPUT_CAPACITY];
@@ -163,6 +170,12 @@ bool board_a_event_buffer_pull_record(
     board_a_event_buffer_t *buffer,
     board_a_event_buffer_record_t *record);
 
+bool board_a_event_buffer_peek_record(
+    const board_a_event_buffer_t *buffer,
+    board_a_event_buffer_record_t *record);
+
+void board_a_event_buffer_note_queue_full(board_a_event_buffer_t *buffer);
+
 /*
  * Forces the current event to CLOSE at now_ms. The emitted CLOSE record and
  * status carry INCOMPLETE and FORCED_CLOSE. If no event is open, returns
@@ -171,6 +184,13 @@ bool board_a_event_buffer_pull_record(
  */
 bool board_a_event_buffer_force_close(board_a_event_buffer_t *buffer,
                                       uint64_t now_ms);
+
+/*
+ * Records that the persistence queue rejected an already-pulled event row.
+ * The caller must invoke this once per dropped row. It marks the event
+ * INCOMPLETE and increases the explicit event-dropped counter.
+ */
+void board_a_event_buffer_note_queue_drop(board_a_event_buffer_t *buffer);
 
 void board_a_event_buffer_status(
     const board_a_event_buffer_t *buffer,

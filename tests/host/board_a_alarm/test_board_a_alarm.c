@@ -113,6 +113,27 @@ static void test_config_validation(void)
   CHECK(!alarm.state.buzzer_enable);
 }
 
+static void test_config_field_equality(void)
+{
+  board_a_alarm_config_t left;
+  board_a_alarm_config_t right;
+
+  memset(&left, 0xA5, sizeof(left));
+  memset(&right, 0x5A, sizeof(right));
+  board_a_alarm_default_config(&left);
+  board_a_alarm_default_config(&right);
+  CHECK(board_a_alarm_config_equal(&left, &right));
+  CHECK(memcmp(&left, &right, sizeof(left)) != 0);
+
+  right.assert_samples++;
+  CHECK(!board_a_alarm_config_equal(&left, &right));
+  right = left;
+  right.buzzer_enable = 0U;
+  CHECK(!board_a_alarm_config_equal(&left, &right));
+  CHECK(!board_a_alarm_config_equal(NULL, &right));
+  CHECK(!board_a_alarm_config_equal(&left, NULL));
+}
+
 static void test_normal_and_confirmation(void)
 {
   board_a_alarm_t alarm;
@@ -412,6 +433,7 @@ static void test_sample_identity_and_time_reset(void)
 int main(void)
 {
   test_config_validation();
+  test_config_field_equality();
   test_normal_and_confirmation();
   test_delta_warning_and_phase_pair();
   test_critical_temperature();

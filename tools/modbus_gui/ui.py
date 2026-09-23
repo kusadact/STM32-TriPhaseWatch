@@ -38,7 +38,7 @@ class GuiApplication:
 
         self.port_var = tk.StringVar()
         self.address_var = tk.StringVar(value="1")
-        self.period_var = tk.StringVar(value="10")
+        self.period_var = tk.StringVar(value="30")
         self.connection_var = tk.StringVar(value="未连接")
         self.identity_var = tk.StringVar(value="设备: --")
         self.error_var = tk.StringVar(value="最近错误: --")
@@ -63,6 +63,7 @@ class GuiApplication:
                 "generated",
                 "synced",
                 "dropped",
+                "event_dropped",
                 "uncertain",
                 "queued",
                 "in_flight",
@@ -523,6 +524,7 @@ class GuiApplication:
             ("generated", "generated"),
             ("synced", "synced"),
             ("dropped", "dropped"),
+            ("事件丢弃", "event_dropped"),
             ("uncertain", "uncertain"),
             ("queued", "queued"),
             ("in-flight", "in_flight"),

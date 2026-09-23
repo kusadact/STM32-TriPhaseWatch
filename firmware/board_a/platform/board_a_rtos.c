@@ -6,6 +6,7 @@
 #include "../alarm/board_a_alarm.h"
 #include "../alarm/board_a_alarm_output.h"
 #include "../sensors/sensor_manager.h"
+#include "board_a_event_buffer.h"
 #include "board_a_log_schedule.h"
 #include "board_a_monotonic.h"
 #include "board_a_persistence_tasks.h"
@@ -99,7 +100,9 @@ static board_a_log_schedule_t g_log_schedule;
 static board_a_sensor_manager_t g_sensor_manager;
 static board_a_alarm_t g_alarm;
 static board_a_alarm_config_t g_applied_alarm_config;
+static board_a_event_buffer_t g_event_buffer;
 static bool g_alarm_config_applied;
+static uint32_t g_event_marker_command_id;
 
 static QueueHandle_t g_rx_queue;
 static SemaphoreHandle_t g_model_mutex;
@@ -300,6 +303,68 @@ uint32_t board_a_rtos_now_ms(void)
 {
   (void)board_a_rtos_now_us(NULL);
   return board_a_monotonic_ms(&g_monotonic);
+}
+
+static size_t event_drain_to_persistence(void)
+{
+  return board_a_runtime_drain_event_records(&g_runtime, &g_event_buffer);
+}
+
+static void event_finish_stop_flush(uint64_t now_us)
+{
+  board_a_event_buffer_status_t event_status;
+
+  (void)board_a_event_buffer_force_close(&g_event_buffer, now_us / 1000ULL);
+  (void)event_drain_to_persistence();
+  board_a_event_buffer_status(&g_event_buffer, &event_status);
+  if ((event_status.queued_records == 0U) && !event_status.event_open) {
+    (void)board_a_runtime_complete_event_stop_flush(&g_runtime);
+    if (g_storage_task != NULL) {
+      xTaskNotifyGive(g_storage_task);
+    }
+  }
+}
+
+static void sync_event_marker(uint64_t now_us)
+{
+  board_a_event_buffer_status_t event_status;
+  bool marker_open;
+  uint32_t marker_id;
+  uint64_t marker_start_us;
+  uint32_t command_id;
+
+  if (!board_a_runtime_copy_event_marker(
+          &g_runtime, &marker_open, &marker_id, &marker_start_us)) {
+    return;
+  }
+  board_a_event_buffer_status(&g_event_buffer, &event_status);
+  if (event_status.event_open != marker_open) {
+    if (event_status.event_open) {
+      board_a_runtime_set_event_marker(
+          &g_runtime, true, event_status.event_id,
+          (event_status.event_start_us != 0U) ?
+              event_status.event_start_us : now_us);
+    } else {
+      board_a_runtime_set_event_marker(&g_runtime, false, 0U, 0U);
+    }
+  }
+  if (board_a_runtime_event_marker_dirty(&g_runtime)) {
+    command_id = ++g_event_marker_command_id;
+    if (command_id == 0U) {
+      command_id = ++g_event_marker_command_id;
+    }
+    if (board_a_runtime_request_event_marker_save(
+            &g_runtime, command_id) && (g_config_task != NULL)) {
+      xTaskNotifyGive(g_config_task);
+    }
+  }
+}
+
+static void recover_incomplete_event(void)
+{
+  if (board_a_runtime_recover_incomplete_event(&g_runtime)) {
+    sync_event_marker(board_a_rtos_now_us(NULL));
+  }
 }
 
 static uint64_t sensor_port_now_us(void *context)
@@ -751,6 +816,8 @@ static void debug_status(uint64_t now_us)
   debug_write_u32(persistence.synced);
   debug_uart_puts(" drop=");
   debug_write_u32(persistence.dropped);
+  debug_uart_puts(" edrop=");
+  debug_write_u32(persistence.event_dropped);
   debug_uart_puts(" q=");
   debug_write_u32(persistence.queued);
   debug_uart_puts(" st=");
@@ -796,9 +863,6 @@ static void comm_task(void *argument)
       if (g_config_task != NULL) {
         xTaskNotifyGive(g_config_task);
       }
-      if (g_storage_task != NULL) {
-        xTaskNotifyGive(g_storage_task);
-      }
       continue;
     }
 
@@ -819,12 +883,18 @@ static void comm_task(void *argument)
         &scheduling_state_changed);
     if (scheduling_state_changed) {
       xTaskNotifyGive(g_acquisition_task);
+      if (g_storage_task != NULL) {
+        xTaskNotifyGive(g_storage_task);
+      }
       if (g_alarm_task != NULL) {
         xTaskNotifyGive(g_alarm_task);
       }
     }
     if (response_length != 0U) {
       (void)tx_send(g_response, (uint16_t)response_length);
+      if (g_storage_task != NULL) {
+        xTaskNotifyGive(g_storage_task);
+      }
     }
     debug_status(board_a_rtos_now_us(NULL));
     g_board_a_rtos_diag.comm_stack_min_words =
@@ -899,8 +969,13 @@ static void sensor_scan_if_due(uint64_t now_us)
   }
   if (board_a_sensor_manager_step(&g_sensor_manager, now_us, &snapshot)) {
     board_a_runtime_publish_sensor_snapshot(&g_runtime, &snapshot);
+    (void)board_a_event_buffer_push_snapshot(&g_event_buffer, &snapshot);
     if (board_a_alarm_update(&g_alarm, &snapshot, &alarm_result)) {
       board_a_runtime_publish_alarm_result(&g_runtime, &alarm_result);
+      if (status.run_state == BOARD_A_RUN_RUNNING) {
+        (void)board_a_event_buffer_note_alarm_result(&g_event_buffer,
+                                                     &alarm_result);
+      }
       if (g_alarm_task != NULL) {
         xTaskNotifyGive(g_alarm_task);
       }
@@ -926,7 +1001,7 @@ static void apply_alarm_config_if_changed(void)
     return;
   }
   if (g_alarm_config_applied &&
-      (memcmp(&g_applied_alarm_config, &config, sizeof(config)) == 0)) {
+      board_a_alarm_config_equal(&g_applied_alarm_config, &config)) {
     return;
   }
   if (board_a_alarm_set_config(&g_alarm, &config)) {
@@ -964,7 +1039,12 @@ static void acquisition_task(void *argument)
   for (;;) {
     uint64_t now_us = board_a_rtos_now_us(NULL);
     board_a_runtime_status_t before_tick;
+    board_a_runtime_status_t current;
 
+    if (board_a_runtime_copy_status(&g_runtime, &current) &&
+        current.event_stop_flush_pending) {
+      event_finish_stop_flush(now_us);
+    }
     process_alarm_ack_request();
     apply_alarm_config_if_changed();
     /*
@@ -975,6 +1055,9 @@ static void acquisition_task(void *argument)
      */
     sensor_scan_if_due(now_us);
     now_us = board_a_rtos_now_us(NULL);
+    board_a_event_buffer_step(&g_event_buffer, now_us / 1000ULL);
+    (void)event_drain_to_persistence();
+    sync_event_marker(now_us);
 
     if (board_a_runtime_copy_status(&g_runtime, &before_tick) &&
         (before_tick.run_state == BOARD_A_RUN_RUNNING) &&
@@ -990,6 +1073,11 @@ static void acquisition_task(void *argument)
     }
 
     board_a_runtime_tick(&g_runtime, now_us);
+    if (board_a_runtime_copy_status(&g_runtime, &status)) {
+      if (status.event_stop_flush_pending) {
+        event_finish_stop_flush(now_us);
+      }
+    }
     if (g_storage_task != NULL) {
       xTaskNotifyGive(g_storage_task);
     }
@@ -1115,10 +1203,12 @@ int board_a_rtos_run(void)
   sensor_gpio_init();
   board_a_sensor_manager_init(&g_sensor_manager, &g_sensor_port);
   board_a_alarm_init(&g_alarm);
+  board_a_event_buffer_init(&g_event_buffer);
   board_a_alarm_output_init();
   create_runtime_objects();
   rs485_init();
   board_a_persistence_startup(&g_runtime);
+  recover_incomplete_event();
 
   debug_uart_puts("[board-a] scheduler starting\r\n");
   vTaskStartScheduler();

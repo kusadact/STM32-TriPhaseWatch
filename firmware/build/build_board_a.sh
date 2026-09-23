@@ -76,6 +76,7 @@ sources=(
   "$CORE_DIR/board_a_model.c"
   "$CORE_DIR/board_a_persistence.c"
   "$CORE_DIR/board_a_record_format.c"
+  "$CORE_DIR/board_a_event_buffer.c"
   "$CORE_DIR/board_a_storage_engine.c"
   "$CORE_DIR/board_a_slave.c"
   "$BOARD_DIR/alarm/board_a_alarm.c"

@@ -980,7 +980,7 @@ class GuiState:
     alarm: AlarmSnapshot | None = None
     storage: StorageSnapshot | None = None
     acquisition: AcquisitionPhase = AcquisitionPhase.STOPPED
-    period_sec: int = 10
+    period_sec: int = 30
     completed_count: int = 0
     failed_count: int = 0
     last_sample_id: int | None = None
