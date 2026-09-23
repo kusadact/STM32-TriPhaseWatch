@@ -1,4 +1,4 @@
-"""Run the Mac GUI with ``python3 -m tools.modbus_gui``."""
+"""Run the GUI with ``python3 -m tools.modbus_gui [--demo]``."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import sys
 
 
 def main() -> int:
+    demo = "--demo" in sys.argv[1:]
     try:
         from .ui import main as ui_main
     except ModuleNotFoundError as exc:
@@ -17,7 +18,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    return ui_main()
+    return ui_main(demo=demo)
 
 
 if __name__ == "__main__":

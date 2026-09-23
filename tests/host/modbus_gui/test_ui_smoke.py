@@ -12,9 +12,13 @@ from fake_backend import FakeBackend
 
 try:
     import tkinter as tk
-    from tools.modbus_gui.ui import GuiApplication
+    from tools.modbus_gui.ui import (
+        TEMPERATURE_TREND_COLORS,
+        GuiApplication,
+    )
 except ModuleNotFoundError:
     tk = None
+    TEMPERATURE_TREND_COLORS = ()
     GuiApplication = None
 
 
@@ -35,6 +39,40 @@ class UiSmokeTests(unittest.TestCase):
         )
         return root, controller, app
 
+    def _set_temperature_snapshot(
+        self,
+        controller: GuiController,
+        sample_id: int,
+        temperatures: tuple[int | None, int | None, int | None],
+        qualities: tuple[str, str, str] | None = None,
+    ) -> None:
+        if qualities is None:
+            qualities = tuple(
+                "NOT_PRESENT" if value is None else "OK"
+                for value in temperatures
+            )
+        controller.state.set_snapshot(
+            TemperatureSnapshot.from_payload(
+                {
+                    "sample_id": sample_id,
+                    "source": "REAL_DS18B20",
+                    "sensors": [
+                        {
+                            "sensor_id": sensor_id,
+                            "temperature_x16": temperature_x16,
+                            "quality": qualities[sensor_id],
+                            "rom_short": 0x1200 + sensor_id,
+                            "sample_time": sample_id * 10 + sensor_id,
+                            "source": "REAL_DS18B20",
+                        }
+                        for sensor_id, temperature_x16 in enumerate(
+                            temperatures
+                        )
+                    ],
+                }
+            )
+        )
+
     def test_window_builds_and_closes_without_device_io(self) -> None:
         root, controller, app = self._application()
         try:
@@ -43,6 +81,101 @@ class UiSmokeTests(unittest.TestCase):
             app.period_var.set("30")
             app._render()
             self.assertEqual(app.period_var.get(), "30")
+            app.close()
+        finally:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+            controller.shutdown(timeout=0.5)
+
+    def test_render_empty_temperature_trend_shows_waiting_state(self) -> None:
+        root, controller, app = self._application()
+        try:
+            root.update_idletasks()
+            app._render()
+
+            items = app.temperature_trend_canvas.find_withtag(
+                "temperature_trend_empty"
+            )
+            self.assertEqual(len(items), 1)
+            self.assertEqual(
+                app.temperature_trend_canvas.itemcget(items[0], "text"),
+                "等待采样",
+            )
+            app.close()
+        finally:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+            controller.shutdown(timeout=0.5)
+
+    def test_render_temperature_trend_draws_three_phase_lines(self) -> None:
+        root, controller, app = self._application()
+        try:
+            self._set_temperature_snapshot(
+                controller,
+                1,
+                (320, 400, 480),
+            )
+            self._set_temperature_snapshot(
+                controller,
+                2,
+                (336, 416, 496),
+            )
+            root.update_idletasks()
+            app._render()
+
+            items = app.temperature_trend_canvas.find_withtag(
+                "temperature_trend_line"
+            )
+            self.assertEqual(len(items), 3)
+            self.assertEqual(
+                [
+                    app.temperature_trend_canvas.itemcget(item, "fill")
+                    for item in items
+                ],
+                list(TEMPERATURE_TREND_COLORS),
+            )
+            app.close()
+        finally:
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+            controller.shutdown(timeout=0.5)
+
+    def test_render_temperature_trend_handles_missing_and_equal_values(
+        self,
+    ) -> None:
+        root, controller, app = self._application()
+        try:
+            self._set_temperature_snapshot(
+                controller,
+                1,
+                (320, 320, 320),
+            )
+            self._set_temperature_snapshot(
+                controller,
+                2,
+                (None, 320, None),
+                ("NOT_PRESENT", "OK", "NOT_PRESENT"),
+            )
+            root.update_idletasks()
+            app._render()
+
+            for phase_index in range(3):
+                items = app.temperature_trend_canvas.find_withtag(
+                    f"temperature_trend_phase_{phase_index}"
+                )
+                self.assertEqual(len(items), 1)
+                coordinates = app.temperature_trend_canvas.coords(items[0])
+                self.assertEqual(len(coordinates), 4)
+                if phase_index == 1:
+                    self.assertNotEqual(coordinates[:2], coordinates[2:])
+                else:
+                    self.assertEqual(coordinates[:2], coordinates[2:])
             app.close()
         finally:
             try:
