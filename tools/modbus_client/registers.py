@@ -13,6 +13,7 @@ COMMAND_NAMES = {
     5: "SINGLE",
     6: "SET_TIME",
     7: "ARM_START",
+    8: "ACK_ALARM",
 }
 
 COMMAND_RESULT_NAMES = {
@@ -66,6 +67,55 @@ DS18B20_ERROR_NAMES = {
     7: "RANGE",
     255: "DRIVER",
 }
+
+THERMAL_ALARM_CONTRACT_REVISION = 1
+THERMAL_ALARM_INPUT_START = 0x00C8
+THERMAL_ALARM_INPUT_COUNT = 29
+THERMAL_STATE_INPUT_START = 0x00B0
+THERMAL_STATE_INPUT_COUNT = 53
+THERMAL_ALARM_CONFIG_START = 0x0050
+THERMAL_ALARM_CONFIG_COUNT = 16
+THERMAL_ALARM_CONFIG_REVISION = 1
+
+ALARM_LEVEL_NAMES = {
+    0: "NORMAL",
+    1: "NOTICE",
+    2: "WARNING",
+    3: "CRITICAL",
+    4: "SENSOR_FAULT",
+    5: "UNKNOWN",
+}
+
+ALARM_REASON_NAMES = {
+    0: "NONE",
+    1: "PHASE_TEMPERATURE_HIGH",
+    2: "PHASE_DELTA_HIGH",
+    3: "RISE_RATE_HIGH",
+    4: "SENSOR_NOT_PRESENT",
+    5: "SENSOR_TIMEOUT",
+    6: "SENSOR_CRC_ERROR",
+    7: "SENSOR_RANGE_ERROR",
+    8: "INSUFFICIENT_VALID_PHASES",
+    9: "CONFIG_INVALID",
+}
+
+ALARM_PHASE_NAMES = {
+    0: "NONE",
+    1: "A",
+    2: "B",
+    3: "C",
+}
+
+ALARM_FLAG_VALID = 1 << 0
+ALARM_FLAG_LATCHED = 1 << 1
+ALARM_FLAG_ACKNOWLEDGED = 1 << 2
+ALARM_FLAG_BUZZER_ACTIVE = 1 << 3
+ALARM_FLAG_MASK = (
+    ALARM_FLAG_VALID
+    | ALARM_FLAG_LATCHED
+    | ALARM_FLAG_ACKNOWLEDGED
+    | ALARM_FLAG_BUZZER_ACTIVE
+)
 
 SAVE_STATE_NAMES = {
     0: "IDLE",
@@ -152,6 +202,13 @@ def _i16(value: int) -> int:
 def _require_length(values: Sequence[int], expected: int, name: str) -> None:
     if len(values) != expected:
         raise ValueError(f"{name} requires {expected} registers")
+
+
+def _require_range(value: int, minimum: int, maximum: int, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be in {minimum}..{maximum}")
 
 
 def decode_identity(values: Sequence[int]) -> dict[str, Any]:
@@ -278,6 +335,295 @@ def decode_ds18b20_snapshot(values: Sequence[int]) -> dict[str, Any]:
         "sensors": sensors,
         "sensor_type_code": values[20],
     }
+
+
+def _quality_is_displayable(quality: int) -> bool:
+    return quality in (1, 5)
+
+
+def _quality_is_fault(quality: int) -> bool:
+    return quality in (2, 3, 4, 6)
+
+
+def _alarm_phase_quality_name(quality: int) -> str:
+    return DS18B20_QUALITY_NAMES.get(quality, f"UNKNOWN({quality})")
+
+
+def decode_thermal_alarm(values: Sequence[int]) -> dict[str, Any]:
+    """Decode and validate the fixed 29-register thermal alarm block."""
+
+    _require_length(values, THERMAL_ALARM_INPUT_COUNT, "thermal alarm")
+    revision = values[0]
+    if revision != THERMAL_ALARM_CONTRACT_REVISION:
+        raise ValueError(
+            "thermal alarm contract revision must be "
+            f"{THERMAL_ALARM_CONTRACT_REVISION}"
+        )
+
+    level = values[1]
+    reason = values[2]
+    flags = values[3]
+    trigger_phase = values[4]
+    delta_valid_raw = values[5]
+    maximum_delta_x16 = _i16(values[6])
+    hottest_temperature_x16 = _i16(values[7])
+    hottest_phase = values[8]
+    temperatures = tuple(_i16(value) for value in values[9:12])
+    qualities = tuple(values[12:15])
+
+    if flags & ~ALARM_FLAG_MASK:
+        raise ValueError("thermal alarm flags contain reserved bits")
+    if level not in ALARM_LEVEL_NAMES:
+        raise ValueError(f"thermal alarm level is invalid: {level}")
+    if reason not in ALARM_REASON_NAMES:
+        raise ValueError(f"thermal alarm reason is invalid: {reason}")
+    if trigger_phase not in ALARM_PHASE_NAMES:
+        raise ValueError(
+            f"thermal alarm trigger phase is invalid: {trigger_phase}"
+        )
+    if hottest_phase not in ALARM_PHASE_NAMES:
+        raise ValueError(
+            f"thermal alarm hottest phase is invalid: {hottest_phase}"
+        )
+    if delta_valid_raw not in (0, 1):
+        raise ValueError("thermal alarm delta_valid must be 0 or 1")
+    for index, quality in enumerate(qualities):
+        if quality != 0 and quality not in DS18B20_QUALITY_NAMES:
+            raise ValueError(
+                f"thermal alarm phase {index} quality is invalid: {quality}"
+            )
+
+    alarm_valid = bool(flags & ALARM_FLAG_VALID)
+    delta_valid = bool(delta_valid_raw)
+    if not alarm_valid:
+        if level != 5 or reason != 0 or trigger_phase != 0:
+            raise ValueError("invalid thermal alarm must be UNKNOWN/NONE/NONE")
+        if delta_valid or maximum_delta_x16 != 0:
+            raise ValueError("invalid thermal alarm cannot claim a delta")
+        hottest_phase = 0
+        hottest_temperature_x16 = 0
+
+    displayable = tuple(
+        alarm_valid and _quality_is_displayable(quality)
+        for quality in qualities
+    )
+    displayable_count = sum(displayable)
+    fault_phases = tuple(
+        index
+        for index, quality in enumerate(qualities)
+        if _quality_is_fault(quality)
+    )
+
+    if alarm_valid:
+        for index, quality in enumerate(qualities):
+            if quality == 0:
+                raise ValueError(
+                    f"valid thermal alarm phase {index} has no quality"
+                )
+        if level == 0 and reason != 0:
+            raise ValueError("NORMAL thermal alarm must have reason NONE")
+        if level in (1, 2, 3) and reason not in (1, 2, 3):
+            raise ValueError("metric thermal alarm has an invalid reason")
+        if level == 5 and reason != 0:
+            raise ValueError("UNKNOWN thermal alarm must have reason NONE")
+        if fault_phases and level != 4:
+            raise ValueError("sensor fault quality requires SENSOR_FAULT level")
+
+    if level == 4:
+        if reason not in (4, 5, 6, 7, 8, 9):
+            raise ValueError("SENSOR_FAULT has an invalid reason")
+        if delta_valid or maximum_delta_x16 != 0:
+            raise ValueError("SENSOR_FAULT cannot publish a temperature delta")
+        if reason in (4, 5, 6, 7):
+            if trigger_phase not in (1, 2, 3):
+                raise ValueError("sensor fault requires an A/B/C trigger phase")
+            phase_index = trigger_phase - 1
+            expected_quality = {
+                4: 6,
+                5: 2,
+                6: 3,
+                7: 4,
+            }[reason]
+            quality = qualities[phase_index]
+            latched = bool(flags & ALARM_FLAG_LATCHED)
+            if quality != expected_quality and not (
+                latched and _quality_is_displayable(quality)
+            ):
+                raise ValueError(
+                    "sensor fault reason does not match trigger phase quality"
+                )
+        elif trigger_phase != 0:
+            raise ValueError("non-sensor fault reason requires NONE phase")
+        if (
+            reason == 8
+            and displayable_count >= 2
+            and not (flags & ALARM_FLAG_LATCHED)
+        ):
+            raise ValueError(
+                "INSUFFICIENT_VALID_PHASES requires fewer than two valid phases"
+            )
+
+    if reason == 1:
+        if trigger_phase not in (1, 2, 3):
+            raise ValueError("temperature alarm requires an A/B/C trigger phase")
+        if not displayable[trigger_phase - 1]:
+            raise ValueError("temperature alarm trigger phase is not valid")
+    elif reason == 2:
+        if trigger_phase not in (1, 2, 3):
+            raise ValueError("delta alarm requires an A/B/C trigger phase")
+        if trigger_phase != hottest_phase:
+            raise ValueError("delta alarm trigger phase must be hottest phase")
+    elif reason == 3 and trigger_phase not in (1, 2, 3):
+        raise ValueError("rise-rate alarm requires an A/B/C trigger phase")
+
+    if delta_valid:
+        if displayable_count < 2:
+            raise ValueError("thermal alarm delta requires at least two phases")
+        valid_temperatures = [
+            temperatures[index]
+            for index in range(3)
+            if displayable[index]
+        ]
+        expected_delta = max(valid_temperatures) - min(valid_temperatures)
+        if maximum_delta_x16 != expected_delta:
+            raise ValueError("thermal alarm maximum delta is inconsistent")
+        if hottest_phase not in (1, 2, 3):
+            raise ValueError("delta alarm requires a hottest phase")
+        hottest_index = hottest_phase - 1
+        if not displayable[hottest_index]:
+            raise ValueError("thermal alarm hottest phase is not valid")
+        if hottest_temperature_x16 != temperatures[hottest_index]:
+            raise ValueError("thermal alarm hottest temperature is inconsistent")
+    elif maximum_delta_x16 != 0:
+        raise ValueError("thermal alarm delta is invalid but nonzero")
+
+    if hottest_phase not in (1, 2, 3):
+        hottest_temperature = None
+    else:
+        hottest_index = hottest_phase - 1
+        if not displayable[hottest_index]:
+            raise ValueError("thermal alarm hottest phase is not valid")
+        if hottest_temperature_x16 != temperatures[hottest_index]:
+            raise ValueError("thermal alarm hottest temperature is inconsistent")
+        hottest_temperature = hottest_temperature_x16
+
+    phases = []
+    for index, phase in enumerate(("A", "B", "C")):
+        quality = qualities[index]
+        phases.append(
+            {
+                "phase": phase,
+                "phase_code": index + 1,
+                "valid": displayable[index],
+                "temperature_x16": (
+                    temperatures[index] if displayable[index] else None
+                ),
+                "temperature_unit": "1/16degC",
+                "quality_code": quality,
+                "quality": _alarm_phase_quality_name(quality),
+            }
+        )
+
+    return {
+        "contract_revision": revision,
+        "valid": alarm_valid,
+        "level_code": level,
+        "level": ALARM_LEVEL_NAMES[level],
+        "reason_code": reason,
+        "reason": ALARM_REASON_NAMES[reason],
+        "flags": {
+            "valid": alarm_valid,
+            "latched": bool(flags & ALARM_FLAG_LATCHED),
+            "acknowledged": bool(flags & ALARM_FLAG_ACKNOWLEDGED),
+            "buzzer_active": bool(flags & ALARM_FLAG_BUZZER_ACTIVE),
+        },
+        "latched": bool(flags & ALARM_FLAG_LATCHED),
+        "acknowledged": bool(flags & ALARM_FLAG_ACKNOWLEDGED),
+        "buzzer_active": bool(flags & ALARM_FLAG_BUZZER_ACTIVE),
+        "trigger_phase_code": trigger_phase,
+        "trigger_phase": ALARM_PHASE_NAMES[trigger_phase],
+        "delta_valid": delta_valid,
+        "maximum_delta_x16": maximum_delta_x16 if delta_valid else None,
+        "hottest_temperature_x16": hottest_temperature,
+        "hottest_phase_code": hottest_phase,
+        "hottest_phase": ALARM_PHASE_NAMES[hottest_phase],
+        "phases": phases,
+        "event_id": _word32(values[15], values[16]),
+        "alarm_sample_id": _word32(values[17], values[18]),
+        "duration_sec": _word32(values[19], values[20]),
+        "notice_count": _word32(values[21], values[22]),
+        "warning_count": _word32(values[23], values[24]),
+        "critical_count": _word32(values[25], values[26]),
+        "sensor_fault_count": _word32(values[27], values[28]),
+    }
+
+
+def decode_thermal_alarm_config(values: Sequence[int]) -> dict[str, Any]:
+    """Decode the P7A alarm configuration block at holding 0x0050."""
+
+    _require_length(values, THERMAL_ALARM_CONFIG_COUNT, "thermal alarm config")
+    if values[0] != THERMAL_ALARM_CONFIG_REVISION:
+        raise ValueError(
+            f"unsupported thermal alarm config revision {values[0]}"
+        )
+    phase_notice = _i16(values[1])
+    phase_warning = _i16(values[2])
+    phase_critical = _i16(values[3])
+    delta_notice = _i16(values[4])
+    delta_warning = _i16(values[5])
+    delta_critical = _i16(values[6])
+    rise_notice = _i16(values[7])
+    rise_warning = _i16(values[8])
+    rise_critical = _i16(values[9])
+    assert_samples = values[10]
+    clear_samples = values[11]
+    hysteresis = _i16(values[12])
+    buzzer_enable = values[13]
+
+    _require_range(phase_notice, -880, 2000, "phase_notice_x16")
+    _require_range(phase_warning, -880, 2000, "phase_warning_x16")
+    _require_range(phase_critical, -880, 2000, "phase_critical_x16")
+    if not phase_notice < phase_warning < phase_critical:
+        raise ValueError("phase thresholds must be notice < warning < critical")
+    if not 0 <= delta_notice < delta_warning < delta_critical:
+        raise ValueError("delta thresholds must be 0 <= notice < warning < critical")
+    if not 0 <= rise_notice < rise_warning < rise_critical:
+        raise ValueError("rise thresholds must be 0 <= notice < warning < critical")
+    _require_range(assert_samples, 1, 100, "assert_samples")
+    _require_range(clear_samples, 1, 255, "clear_samples")
+    _require_range(hysteresis, 0, 0x7FFF, "hysteresis_x16")
+    if phase_notice - hysteresis < -880:
+        raise ValueError("phase recovery threshold is below the supported range")
+    if delta_notice - hysteresis < 0:
+        raise ValueError("delta recovery threshold cannot be negative")
+    if rise_notice - hysteresis < 0:
+        raise ValueError("rise recovery threshold cannot be negative")
+    _require_range(buzzer_enable, 0, 1, "buzzer_enable")
+    if values[14] != 0 or values[15] != 0:
+        raise ValueError("thermal alarm config reserved registers must be 0")
+
+    return {
+        "contract_revision": values[0],
+        "phase_notice_x16": phase_notice,
+        "phase_warning_x16": phase_warning,
+        "phase_critical_x16": phase_critical,
+        "delta_notice_x16": delta_notice,
+        "delta_warning_x16": delta_warning,
+        "delta_critical_x16": delta_critical,
+        "rise_notice_x16_per_min": rise_notice,
+        "rise_warning_x16_per_min": rise_warning,
+        "rise_critical_x16_per_min": rise_critical,
+        "assert_samples": assert_samples,
+        "clear_samples": clear_samples,
+        "hysteresis_x16": hysteresis,
+        "buzzer_enable": bool(buzzer_enable),
+    }
+
+
+def decode_alarm_config(values: Sequence[int]) -> dict[str, Any]:
+    """Compatibility alias for the fixed alarm configuration decoder."""
+
+    return decode_thermal_alarm_config(values)
 
 
 def decode_stats(values: Sequence[int]) -> dict[str, Any]:
@@ -409,6 +755,7 @@ def decode_persistence_status(values: Sequence[int]) -> dict[str, Any]:
         "captured_period_s": _word32(values[0x24], values[0x25]),
         "captured_mask": values[0x26],
         "captured_count": values[0x27],
+        "event_dropped": _word32(values[0x28], values[0x29]),
     }
 
 

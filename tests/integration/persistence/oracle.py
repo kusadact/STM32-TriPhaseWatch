@@ -77,12 +77,24 @@ CSV_DS18B20_COLUMNS = (
     "ds18b20_1_sample_ms",
     "ds18b20_2_sample_ms",
 )
+CSV_EVENT_COLUMNS = (
+    "event_id",
+    "event_phase",
+    "event_level",
+    "event_reason",
+    "event_trigger_phase",
+    "event_max_delta_x16",
+    "event_delta_valid",
+    "event_flags",
+)
 CSV_SCHEMA2_COLUMNS = CSV_SCHEMA1_COLUMNS + CSV_DHT11_COLUMNS
 CSV_SCHEMA3_COLUMNS = CSV_SCHEMA1_COLUMNS + CSV_DS18B20_COLUMNS
+CSV_SCHEMA4_COLUMNS = CSV_SCHEMA3_COLUMNS + CSV_EVENT_COLUMNS
 CSV_COLUMNS = CSV_SCHEMA2_COLUMNS
 CSV_SCHEMA1_HEADER = ",".join(CSV_SCHEMA1_COLUMNS)
 CSV_SCHEMA2_HEADER = ",".join(CSV_SCHEMA2_COLUMNS)
 CSV_SCHEMA3_HEADER = ",".join(CSV_SCHEMA3_COLUMNS)
+CSV_SCHEMA4_HEADER = ",".join(CSV_SCHEMA4_COLUMNS)
 CSV_HEADER = CSV_SCHEMA2_HEADER
 
 U16_FIELDS = {
@@ -129,6 +141,12 @@ U16_FIELDS = {
     "ds18b20_0_rom_short",
     "ds18b20_1_rom_short",
     "ds18b20_2_rom_short",
+    "event_phase",
+    "event_level",
+    "event_reason",
+    "event_trigger_phase",
+    "event_delta_valid",
+    "event_flags",
 }
 U32_FIELDS = {
     "session",
@@ -145,12 +163,14 @@ U32_FIELDS = {
     "ds18b20_0_sample_ms",
     "ds18b20_1_sample_ms",
     "ds18b20_2_sample_ms",
+    "event_id",
 }
 U64_FIELDS = {"planned_ms", "actual_ms"}
 I16_FIELDS = {
     "ds18b20_0_temp_x16",
     "ds18b20_1_temp_x16",
     "ds18b20_2_temp_x16",
+    "event_max_delta_x16",
 }
 
 MASK_CHANNELS = 0x000F
@@ -236,6 +256,14 @@ class CsvRecord:
     ds18b20_0_sample_ms: int = 0
     ds18b20_1_sample_ms: int = 0
     ds18b20_2_sample_ms: int = 0
+    event_id: int = 0
+    event_phase: int = 0
+    event_level: int = 0
+    event_reason: int = 0
+    event_trigger_phase: int = 0
+    event_max_delta_x16: int = 0
+    event_delta_valid: int = 0
+    event_flags: int = 0
 
     @property
     def values(self) -> tuple[int, ...]:
@@ -243,6 +271,7 @@ class CsvRecord:
             1: CSV_SCHEMA1_COLUMNS,
             2: CSV_SCHEMA2_COLUMNS,
             3: CSV_SCHEMA3_COLUMNS,
+            4: CSV_SCHEMA4_COLUMNS,
         }.get(self.schema, CSV_SCHEMA3_COLUMNS)
         return tuple(getattr(self, name) for name in columns)
 
@@ -307,6 +336,14 @@ class CsvRecord:
             self.ds18b20_0_sample_ms,
             self.ds18b20_1_sample_ms,
             self.ds18b20_2_sample_ms,
+            self.event_id,
+            self.event_phase,
+            self.event_level,
+            self.event_reason,
+            self.event_trigger_phase,
+            self.event_max_delta_x16,
+            self.event_delta_valid,
+            self.event_flags,
         )
 
 
@@ -423,23 +460,27 @@ def parse_csv_bytes(
     schema1_header = CSV_SCHEMA1_HEADER.encode("ascii")
     schema2_header = CSV_SCHEMA2_HEADER.encode("ascii")
     schema3_header = CSV_SCHEMA3_HEADER.encode("ascii")
+    schema4_header = CSV_SCHEMA4_HEADER.encode("ascii")
     if lines[0] == schema1_header:
         columns = CSV_SCHEMA1_COLUMNS
     elif lines[0] == schema2_header:
         columns = CSV_SCHEMA2_COLUMNS
     elif lines[0] == schema3_header:
         columns = CSV_SCHEMA3_COLUMNS
+    elif lines[0] == schema4_header:
+        columns = CSV_SCHEMA4_COLUMNS
     else:
         raise CsvContractError(
             "header_mismatch",
-            "CSV header does not match schema 1, 2, or 3 exactly",
+            "CSV header does not match schema 1, 2, 3, or 4 exactly",
             offset=0,
         )
 
     records: list[CsvRecord] = []
     byte_offset = len(lines[0]) + 1
     for line_number, line in enumerate(lines[1:], start=2):
-        if line in (schema1_header, schema2_header, schema3_header):
+        if line in (schema1_header, schema2_header, schema3_header,
+                    schema4_header):
             raise CsvContractError(
                 "duplicate_header",
                 f"duplicate header at line {line_number}",
@@ -574,6 +615,10 @@ def utc_date_text(utc_s: int) -> str:
     return datetime.fromtimestamp(utc_s, timezone.utc).strftime("%Y%m%d")
 
 
+def is_event_record(record: CsvRecord) -> bool:
+    return record.schema == 4 and record.event_phase != 0
+
+
 def validate_record_contract(
     record: CsvRecord,
     *,
@@ -584,11 +629,15 @@ def validate_record_contract(
     def issue(code: str, message: str) -> None:
         issues.append({"code": code, "message": message})
 
-    if record.schema not in (1, 2, 3):
-        issue("schema", f"schema={record.schema}, expected 1, 2, or 3")
+    event_record = record.schema == 4 and record.event_phase != 0
+    if record.schema not in (1, 2, 3, 4):
+        issue("schema", f"schema={record.schema}, expected 1, 2, 3, or 4")
     if record.reserved != 0:
         issue("reserved", f"reserved={record.reserved}, expected 0")
-    if record.trigger not in (1, 2):
+    if event_record:
+        if record.trigger != 0:
+            issue("event_trigger", "schema-4 event rows require trigger=NONE")
+    elif record.trigger not in (1, 2):
         issue("trigger", f"trigger={record.trigger}, expected 1 or 2")
     if record.source not in (1, 2, 3):
         issue(
@@ -601,6 +650,28 @@ def validate_record_contract(
         issue("schema_source", "CSV schema 2 requires TEST or REAL_DHT11 source")
     if record.schema == 3 and record.source not in (1, 3):
         issue("schema_source", "CSV schema 3 requires TEST or REAL_DS18B20 source")
+    if record.schema == 4 and record.source not in (1, 3):
+        issue(
+            "schema_source",
+            "CSV schema 4 requires TEST or REAL_DS18B20 source",
+        )
+    if (
+        record.schema == 4
+        and not event_record
+        and any(
+            (
+                record.event_id,
+                record.event_phase,
+                record.event_level,
+                record.event_reason,
+                record.event_trigger_phase,
+                record.event_max_delta_x16,
+                record.event_delta_valid,
+                record.event_flags,
+            )
+        )
+    ):
+        issue("normal_event_fields", "schema-4 normal rows require zero event fields")
     if record.actual_ms < record.planned_ms:
         issue(
             "timestamp_order",
@@ -678,6 +749,152 @@ def validate_record_contract(
                         f"sample_count={record.sample_count}"
                     ),
                 )
+
+    if event_record:
+        if record.source != 3:
+            issue("event_source", "schema-4 event rows require REAL_DS18B20 source")
+        if record.event_id == 0:
+            issue("event_id", "schema-4 event rows require a non-zero event_id")
+        if record.ds18b20_sample_id != record.seq:
+            issue(
+                "event_sample_id",
+                (
+                    f"event row seq={record.seq} does not match "
+                    f"ds18b20_sample_id={record.ds18b20_sample_id}"
+                ),
+            )
+        if any(
+            (
+                record.ds18b20_0_error,
+                record.ds18b20_1_error,
+                record.ds18b20_2_error,
+                record.ds18b20_0_rom_short,
+                record.ds18b20_1_rom_short,
+                record.ds18b20_2_rom_short,
+                record.ds18b20_0_sample_ms,
+                record.ds18b20_1_sample_ms,
+                record.ds18b20_2_sample_ms,
+            )
+        ):
+            issue(
+                "event_aux_fields",
+                "event rows require error/rom_short/sample_ms fields at zero",
+            )
+        if record.planned_ms != record.actual_ms:
+            issue(
+                "event_time",
+                "schema-4 event rows require planned_ms == actual_ms",
+            )
+        if record.event_phase not in (1, 2, 3, 4, 5):
+            issue(
+                "event_phase",
+                f"event_phase={record.event_phase}, expected 1..5",
+            )
+        if record.event_level not in (0, 1, 2, 3, 4, 5):
+            issue(
+                "event_level",
+                f"event_level={record.event_level}, expected 0..5",
+            )
+        if record.event_reason not in range(0, 10):
+            issue(
+                "event_reason",
+                f"event_reason={record.event_reason}, expected 0..9",
+            )
+        if record.event_trigger_phase not in (0, 1, 2, 3):
+            issue(
+                "event_trigger_phase",
+                (
+                    f"event_trigger_phase={record.event_trigger_phase}, "
+                    "expected 0..3"
+                ),
+            )
+        if record.event_delta_valid not in (0, 1):
+            issue(
+                "event_delta_valid",
+                f"event_delta_valid={record.event_delta_valid}, expected 0 or 1",
+            )
+        elif record.event_delta_valid == 0 and record.event_max_delta_x16 != 0:
+            issue(
+                "event_delta_value",
+                "event_delta_valid=0 requires event_max_delta_x16=0",
+            )
+        if record.event_flags & ~0x03FF:
+            issue(
+                "event_flags",
+                f"event_flags={record.event_flags} has unknown bits",
+            )
+        if any(
+            (
+                record.dht_valid_mask,
+                record.dht_sample_id,
+                record.dht0_temp_x10,
+                record.dht1_temp_x10,
+                record.dht2_temp_x10,
+                record.dht0_humidity_x10,
+                record.dht1_humidity_x10,
+                record.dht2_humidity_x10,
+                record.dht0_quality,
+                record.dht1_quality,
+                record.dht2_quality,
+                record.dht0_error,
+                record.dht1_error,
+                record.dht2_error,
+                record.dht0_sample_ms,
+                record.dht1_sample_ms,
+                record.dht2_sample_ms,
+            )
+        ):
+            issue("event_dht11_fields", "event rows require DHT11 fields at zero")
+        for index in range(4):
+            if (
+                (record.u0, record.u1, record.u2, record.u3)[index] != 2
+                or (record.v0, record.v1, record.v2, record.v3)[index] != 0
+                or (record.q0, record.q1, record.q2, record.q3)[index] != 0
+            ):
+                issue(
+                    "event_legacy_channel",
+                    (
+                        f"event row requires legacy channel {index} to use "
+                        "temperature unit, zero value and zero quality"
+                    ),
+                )
+        if record.ds18b20_valid_mask & ~0x0007:
+            issue(
+                "ds18b20_valid_mask",
+                f"invalid DS18B20 valid mask {record.ds18b20_valid_mask}",
+            )
+        event_temperatures = (
+            record.ds18b20_0_temp_x16,
+            record.ds18b20_1_temp_x16,
+            record.ds18b20_2_temp_x16,
+        )
+        event_qualities = (
+            record.ds18b20_0_quality,
+            record.ds18b20_1_quality,
+            record.ds18b20_2_quality,
+        )
+        for index, quality in enumerate(event_qualities):
+            expected_valid = quality in (1, 5)
+            if quality not in (0, 1, 2, 3, 4, 5, 6):
+                issue(
+                    "ds18b20_quality",
+                    f"DS18B20-{index} has invalid quality={quality}",
+                )
+                continue
+            if bool(record.ds18b20_valid_mask & (1 << index)) != expected_valid:
+                issue(
+                    "ds18b20_valid_mask",
+                    (
+                        f"DS18B20-{index} quality={quality} does not match "
+                        "valid mask bit"
+                    ),
+                )
+            if not expected_valid and event_temperatures[index] != 0:
+                issue(
+                    "ds18b20_invalid_value",
+                    f"DS18B20-{index} reports a temperature without a valid sample",
+                )
+        return issues
 
     values = (record.v0, record.v1, record.v2, record.v3)
     units = (record.u0, record.u1, record.u2, record.u3)
@@ -849,8 +1066,8 @@ def validate_record_contract(
                     ),
                 )
     else:
-        if record.schema != 3:
-            issue("ds18b20_schema", "REAL_DS18B20 requires CSV schema 3")
+        if record.schema not in (3, 4):
+            issue("ds18b20_schema", "REAL_DS18B20 requires CSV schema 3 or 4")
         if record.ds18b20_sample_id == 0:
             issue(
                 "ds18b20_sample_id",
@@ -939,9 +1156,112 @@ def validate_sampling_timeline(
     def issue(code: str, message: str) -> None:
         issues.append({"code": code, "message": message})
 
-    previous: CsvRecord | None = None
+    previous_normal: CsvRecord | None = None
+    event_id: int | None = None
+    event_phase: int | None = None
+    event_time_ms: int | None = None
+    event_seen_trigger = False
+    event_seen_active = False
+    event_closed = False
     for index, record in enumerate(records):
-        if record.trigger == 2 and record.planned_ms != record.actual_ms:
+        event_record = is_event_record(record)
+        if event_record and record.planned_ms != record.actual_ms:
+            issue(
+                "event_time",
+                (
+                    f"record {index}: event rows require planned_ms == "
+                    f"actual_ms, got {record.planned_ms} != {record.actual_ms}"
+                ),
+            )
+        if event_record:
+            if event_id != record.event_id:
+                event_id = record.event_id
+                event_phase = None
+                event_time_ms = None
+                event_seen_trigger = False
+                event_seen_active = False
+                event_closed = False
+
+            if record.event_phase == 1:
+                if event_seen_trigger or event_seen_active or event_closed:
+                    issue(
+                        "event_phase_order",
+                        f"record {index}: PRE appears after the event started",
+                    )
+                if (
+                    event_phase == 1
+                    and event_time_ms is not None
+                    and record.actual_ms < event_time_ms
+                ):
+                    issue(
+                        "actual_order",
+                        (
+                            f"record {index}: PRE actual_ms={record.actual_ms} "
+                            f"is earlier than previous PRE {event_time_ms}"
+                        ),
+                    )
+            elif record.event_phase == 2:
+                if event_seen_trigger or event_seen_active or event_closed:
+                    issue(
+                        "event_phase_order",
+                        f"record {index}: duplicate or late TRIGGER",
+                    )
+                event_seen_trigger = True
+            elif record.event_phase == 3:
+                if not event_seen_trigger or event_closed:
+                    issue(
+                        "event_phase_order",
+                        f"record {index}: ACTIVE without an open trigger",
+                    )
+                event_seen_active = True
+            elif record.event_phase == 4:
+                if not event_seen_trigger or event_closed:
+                    issue(
+                        "event_phase_order",
+                        f"record {index}: POST without an open trigger",
+                    )
+                event_seen_active = True
+            elif record.event_phase == 5:
+                if not event_seen_trigger or event_closed:
+                    issue(
+                        "event_phase_order",
+                        f"record {index}: duplicate or premature CLOSE",
+                    )
+                event_closed = True
+
+            if record.event_phase != 1 or event_phase == 1:
+                if (
+                    event_time_ms is not None
+                    and record.actual_ms < event_time_ms
+                ):
+                    issue(
+                        "actual_order",
+                        (
+                            f"record {index}: event actual_ms={record.actual_ms} "
+                            f"is earlier than previous event time={event_time_ms}"
+                        ),
+                    )
+            if (
+                previous_normal is not None
+                and record.actual_ms < previous_normal.actual_ms
+                and record.event_phase != 1
+            ):
+                issue(
+                    "actual_order",
+                    (
+                        f"record {index}: event actual_ms={record.actual_ms} "
+                        f"is earlier than previous normal "
+                        f"actual_ms={previous_normal.actual_ms}"
+                    ),
+                )
+            event_phase = record.event_phase
+            event_time_ms = record.actual_ms
+            continue
+
+        if (
+            record.trigger == 2
+            and record.planned_ms != record.actual_ms
+        ):
             issue(
                 "single_time",
                 (
@@ -949,29 +1269,34 @@ def validate_sampling_timeline(
                     f"actual_ms, got {record.planned_ms} != {record.actual_ms}"
                 ),
             )
-        if previous is not None:
-            if record.actual_ms < previous.actual_ms:
+        if previous_normal is not None:
+            if record.actual_ms < previous_normal.actual_ms:
                 issue(
                     "actual_order",
                     (
                         f"record {index}: actual_ms={record.actual_ms} is earlier "
-                        f"than the previous actual_ms={previous.actual_ms}"
+                        f"than the previous normal actual_ms="
+                        f"{previous_normal.actual_ms}"
                     ),
                 )
-            if record.trigger == 1 and previous.trigger == 1:
-                step = record.planned_ms - previous.actual_ms
-                expected = record.period_s * 1000
-                previous_expected = previous.period_s * 1000
-                if step not in (expected, previous_expected):
-                    issue(
-                        "planned_step",
-                        (
-                            f"record {index}: planned_ms={record.planned_ms} is "
-                            f"{step} ms after the previous actual_ms="
-                            f"{previous.actual_ms}, expected {expected} ms"
-                        ),
-                    )
-        previous = record
+        if (
+            record.trigger == 1
+            and previous_normal is not None
+            and previous_normal.trigger == 1
+        ):
+            step = record.planned_ms - previous_normal.actual_ms
+            expected = record.period_s * 1000
+            previous_expected = previous_normal.period_s * 1000
+            if step not in (expected, previous_expected):
+                issue(
+                    "planned_step",
+                    (
+                        f"record {index}: planned_ms={record.planned_ms} is "
+                        f"{step} ms after the previous actual_ms="
+                        f"{previous_normal.actual_ms}, expected {expected} ms"
+                    ),
+                )
+        previous_normal = record
     return issues
 
 
@@ -1060,10 +1385,10 @@ def validate_storage_block(storage: Mapping[str, int]) -> list[dict[str, Any]]:
     def issue(code: str, message: str) -> None:
         issues.append({"code": code, "message": message})
 
-    if storage["contract_revision"] != 1:
+    if storage["contract_revision"] not in (1, 2):
         issue(
             "contract_revision",
-            f"contract_revision={storage['contract_revision']}, expected 1",
+            f"contract_revision={storage['contract_revision']}, expected 1 or 2",
         )
     if storage["save_state"] not in (0, 1, 2, 3):
         issue("save_state", f"invalid save_state={storage['save_state']}")
@@ -1135,6 +1460,8 @@ def records_are_contiguous(
     issues: list[dict[str, Any]] = []
     previous: CsvRecord | None = None
     for current in records:
+        if is_event_record(current):
+            continue
         if previous is None:
             previous = current
             continue
@@ -1157,6 +1484,8 @@ def duplicate_identity_issues(records: Sequence[CsvRecord]) -> list[dict[str, An
     first: dict[tuple[int, int], CsvRecord] = {}
     issues: list[dict[str, Any]] = []
     for record in records:
+        if is_event_record(record):
+            continue
         key = (record.session, record.seq)
         existing = first.get(key)
         if existing is None:

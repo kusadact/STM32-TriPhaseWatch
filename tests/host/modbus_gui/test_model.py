@@ -5,8 +5,12 @@ import unittest
 
 from tools.modbus_gui.model import (
     AcquisitionPhase,
+    AlarmLevel,
+    AlarmReason,
+    AlarmSnapshot,
     ConnectionState,
     GuiState,
+    Phase,
     Quality,
     SensorStatistics,
     SnapshotFormatError,
@@ -33,7 +37,129 @@ def sensor(
     }
 
 
+def alarm_payload(
+    *,
+    level: str = "NOTICE",
+    reason: str = "PHASE_DELTA_HIGH",
+    flags: dict[str, bool] | None = None,
+    delta_valid: bool = True,
+    maximum_delta_x16: int | None = 160,
+    trigger_phase: str = "A",
+    hottest_phase: str = "A",
+    hottest_temperature_x16: int | None = 480,
+    temperatures: tuple[int | None, int | None, int | None] = (480, 320, 320),
+    qualities: tuple[str, str, str] = ("OK", "OK", "OK"),
+) -> dict[str, object]:
+    if flags is None:
+        flags = {
+            "valid": True,
+            "latched": True,
+            "acknowledged": False,
+            "buzzer_active": True,
+        }
+    return {
+        "contract_revision": 1,
+        "valid": flags["valid"],
+        "level": level,
+        "reason": reason,
+        "flags": flags,
+        "trigger_phase": trigger_phase,
+        "delta_valid": delta_valid,
+        "maximum_delta_x16": maximum_delta_x16,
+        "hottest_temperature_x16": hottest_temperature_x16,
+        "hottest_phase": hottest_phase,
+        "phases": [
+            {
+                "phase": phase,
+                "temperature_x16": temperatures[index],
+                "quality": qualities[index],
+            }
+            for index, phase in enumerate(("A", "B", "C"))
+        ],
+        "event_id": 3,
+        "alarm_sample_id": 99,
+        "duration_sec": 12,
+        "notice_count": 1,
+        "warning_count": 0,
+        "critical_count": 0,
+        "sensor_fault_count": 0,
+    }
+
+
 class ModelTests(unittest.TestCase):
+    def test_alarm_snapshot_maps_levels_phases_and_colors(self) -> None:
+        received = datetime(2026, 9, 23, 10, 0, 12)
+        alarm = AlarmSnapshot.from_payload(
+            alarm_payload(level="WARNING"),
+            received_at=received,
+        )
+
+        self.assertEqual(alarm.level, AlarmLevel.WARNING)
+        self.assertEqual(alarm.reason, AlarmReason.PHASE_DELTA_HIGH)
+        self.assertEqual(alarm.trigger_phase, Phase.A)
+        self.assertEqual(alarm.maximum_delta_text, "10.00 °C")
+        self.assertEqual(alarm.hottest_temperature_text, "30.00 °C")
+        self.assertEqual(alarm.buzzer_text, "蜂鸣中")
+        self.assertEqual(alarm.acknowledged_text, "未确认")
+        self.assertEqual(alarm.event_time_text, "2026-09-23 10:00:00")
+        self.assertEqual(alarm.color, "#f97316")
+
+    def test_alarm_normal_is_green(self) -> None:
+        alarm = AlarmSnapshot.from_payload(
+            alarm_payload(
+                level="NORMAL",
+                reason="NONE",
+                maximum_delta_x16=0,
+                trigger_phase="NONE",
+                hottest_phase="A",
+                hottest_temperature_x16=400,
+                temperatures=(400, 400, 400),
+            )
+        )
+
+        self.assertEqual(alarm.level, AlarmLevel.NORMAL)
+        self.assertEqual(alarm.reason, AlarmReason.NONE)
+        self.assertEqual(alarm.color, "#15803d")
+
+    def test_alarm_snapshot_rejects_fault_delta_and_hides_invalid_temperature(
+        self,
+    ) -> None:
+        payload = alarm_payload(
+            level="SENSOR_FAULT",
+            reason="SENSOR_CRC_ERROR",
+            trigger_phase="B",
+            qualities=("OK", "CRC_ERROR", "OK"),
+            temperatures=(480, 0, 320),
+        )
+        with self.assertRaises(SnapshotFormatError):
+            AlarmSnapshot.from_payload(payload)
+
+        payload["delta_valid"] = False
+        payload["maximum_delta_x16"] = None
+        payload["hottest_phase"] = "NONE"
+        payload["hottest_temperature_x16"] = None
+        alarm = AlarmSnapshot.from_payload(payload)
+        self.assertEqual(alarm.phases[1].temperature_text, "--")
+        self.assertEqual(alarm.maximum_delta_text, "--")
+        self.assertEqual(alarm.level, AlarmLevel.SENSOR_FAULT)
+
+    def test_gui_state_preserves_event_time_for_same_event_id(self) -> None:
+        state = GuiState()
+        first = AlarmSnapshot.from_payload(
+            alarm_payload(),
+            received_at=datetime(2026, 9, 23, 10, 0, 12),
+        )
+        state.set_alarm(first)
+        event_time = state.alarm.event_time
+
+        later = AlarmSnapshot.from_payload(
+            alarm_payload(),
+            received_at=datetime(2026, 9, 23, 10, 0, 20),
+        )
+        state.set_alarm(later)
+
+        self.assertEqual(state.alarm.event_time, event_time)
+
     def test_three_valid_sensors_drive_cards_and_statistics(self) -> None:
         received = datetime(2026, 9, 22, 10, 11, 12)
         snapshot = TemperatureSnapshot.from_payload(
@@ -233,12 +359,14 @@ class ModelTests(unittest.TestCase):
                 "generated": 40,
                 "synced": 31,
                 "dropped": 0,
+                "event_dropped": 3,
                 "queued": 8,
             }
         )
 
         self.assertEqual(storage.text("generated"), "40")
         self.assertEqual(storage.text("synced"), "31")
+        self.assertEqual(storage.text("event_dropped"), "3")
         self.assertEqual(storage.text("queued"), "8")
         self.assertEqual(storage.text("uncertain"), "--")
 

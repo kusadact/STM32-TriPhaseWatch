@@ -50,6 +50,7 @@ def persistence_values(
     generated: int = 0,
     synced: int = 0,
     queued: int = 0,
+    event_dropped: int = 0,
 ) -> tuple[int, ...]:
     values = [0] * 48
     values[0] = 1
@@ -71,6 +72,8 @@ def persistence_values(
     values[0x25] = captured_period & 0xFFFF
     values[0x26] = captured_mask
     values[0x27] = captured_count
+    values[0x28] = event_dropped >> 16
+    values[0x29] = event_dropped & 0xFFFF
     return tuple(values)
 
 
@@ -114,6 +117,7 @@ class PersistenceCliTests(unittest.TestCase):
             generated=40,
             synced=31,
             queued=8,
+            event_dropped=3,
         )
         transport = ScriptedTransport(
             lambda request: read_response(request, values)
@@ -131,6 +135,7 @@ class PersistenceCliTests(unittest.TestCase):
         self.assertEqual(result["generated"], 40)
         self.assertEqual(result["synced"], 31)
         self.assertEqual(result["queued"], 8)
+        self.assertEqual(result["event_dropped"], 3)
 
     def test_storage_status_decodes_u32_captured_period_words(self) -> None:
         values = persistence_values(

@@ -77,6 +77,88 @@ bool board_a_runtime_copy_sensor_map(
   return copied;
 }
 
+void board_a_runtime_publish_alarm_state(
+    board_a_runtime_t *runtime, const board_a_alarm_state_t *state)
+{
+  if ((state == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_publish_alarm_state(&runtime->slave.model, state);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_copy_alarm_state(
+    board_a_runtime_t *runtime, board_a_alarm_state_t *state)
+{
+  bool copied;
+
+  if ((state == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_alarm_state(&runtime->slave.model, state);
+  runtime_unlock(runtime);
+  return copied;
+}
+
+void board_a_runtime_publish_alarm_result(
+    board_a_runtime_t *runtime, const board_a_alarm_result_t *result)
+{
+  if ((result == NULL) || !runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_publish_alarm_result(&runtime->slave.model, result);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_copy_alarm_event(
+    board_a_runtime_t *runtime, board_a_alarm_result_t *result)
+{
+  bool copied;
+
+  if ((result == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_alarm_event(&runtime->slave.model, result);
+  runtime_unlock(runtime);
+  return copied;
+}
+
+bool board_a_runtime_copy_alarm_config(
+    board_a_runtime_t *runtime, board_a_alarm_config_t *config)
+{
+  bool copied;
+
+  if ((config == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_alarm_config(&runtime->slave.model, config);
+  runtime_unlock(runtime);
+  return copied;
+}
+
+void board_a_runtime_publish_alarm_buzzer_active(
+    board_a_runtime_t *runtime, bool active)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_set_alarm_buzzer_active(&runtime->slave.model, active);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_take_alarm_ack_request(board_a_runtime_t *runtime)
+{
+  bool requested;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  requested =
+      board_a_model_take_alarm_ack_request(&runtime->slave.model);
+  runtime_unlock(runtime);
+  return requested;
+}
+
 bool board_a_runtime_request_sensor_map_save(
     board_a_runtime_t *runtime, uint32_t command_id)
 {
@@ -93,6 +175,10 @@ bool board_a_runtime_request_sensor_map_save(
   config.period_sec = model->active_config.config.period_sec;
   config.channel_mask = model->active_config.config.channel_mask;
   config.record_count = model->active_config.config.record_count;
+  config.alarm = model->active_config.alarm_config;
+  config.event_open = model->event_marker_open;
+  config.event_id = model->event_marker_id;
+  config.event_start_us = model->event_marker_start_us;
   config.sensor_valid_mask = model->sensor_map.valid_mask;
   for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
     memcpy(config.sensor_roms[index], model->sensor_map.bindings[index].rom,
@@ -122,6 +208,7 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
   uint16_t run_state_before;
   bool start_pending_before;
   bool schedule_armed_before;
+  bool alarm_ack_requested_before;
   uint64_t next_sample_before;
   uint64_t schedule_deadline_before;
 
@@ -136,6 +223,7 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
   start_pending_before = runtime->slave.model.start_pending;
   next_sample_before = runtime->slave.model.next_sample_us;
   schedule_armed_before = runtime->slave.model.time.schedule_armed;
+  alarm_ack_requested_before = runtime->slave.model.alarm_ack_requested;
   schedule_deadline_before = runtime->slave.model.time.schedule_deadline_us;
   /*
    * Commands bind the monotonic instant of their own execution, so sample the
@@ -152,6 +240,8 @@ size_t board_a_runtime_poll_observe(board_a_runtime_t *runtime,
         (version_before != runtime->slave.model.active_config.version) ||
         (run_state_before != (uint16_t)runtime->slave.model.run_state) ||
         (start_pending_before != runtime->slave.model.start_pending) ||
+        (alarm_ack_requested_before !=
+         runtime->slave.model.alarm_ack_requested) ||
         (next_sample_before != runtime->slave.model.next_sample_us) ||
         (schedule_armed_before != runtime->slave.model.time.schedule_armed) ||
         (schedule_deadline_before !=
@@ -197,6 +287,8 @@ bool board_a_runtime_copy_status(board_a_runtime_t *runtime,
   status->start_pending = runtime->slave.model.start_pending;
   status->schedule_deadline_us = runtime->slave.model.time.schedule_deadline_us;
   status->schedule_armed = runtime->slave.model.time.schedule_armed;
+  status->event_stop_flush_pending =
+      runtime->slave.model.event_stop_flush_pending;
   status->schedule_start_late_us =
       runtime->slave.model.time.schedule_start_late_us;
   status->schedule_start_count =
@@ -258,6 +350,51 @@ bool board_a_runtime_pop_record(
   return popped;
 }
 
+bool board_a_runtime_enqueue_event_record(
+    board_a_runtime_t *runtime,
+    const board_a_event_buffer_record_t *event_record)
+{
+  bool enqueued;
+
+  if ((event_record == NULL) || !runtime_lock(runtime)) {
+    return false;
+  }
+  enqueued = board_a_model_enqueue_event_record(
+                 &runtime->slave.model, event_record) ==
+      BOARD_A_EVENT_ENQUEUE_OK;
+  runtime_unlock(runtime);
+  return enqueued;
+}
+
+size_t board_a_runtime_drain_event_records(
+    board_a_runtime_t *runtime, board_a_event_buffer_t *event_buffer)
+{
+  size_t accepted = 0U;
+  board_a_event_buffer_record_t event_record;
+
+  if ((event_buffer == NULL) || !runtime_lock(runtime)) {
+    return 0U;
+  }
+  while (board_a_event_buffer_peek_record(event_buffer, &event_record)) {
+    board_a_event_enqueue_result_t result =
+        board_a_model_enqueue_event_record(
+            &runtime->slave.model, &event_record);
+
+    if (result == BOARD_A_EVENT_ENQUEUE_OK) {
+      (void)board_a_event_buffer_pull_record(event_buffer, &event_record);
+      accepted++;
+    } else if (result == BOARD_A_EVENT_ENQUEUE_DROP) {
+      (void)board_a_event_buffer_pull_record(event_buffer, &event_record);
+      board_a_event_buffer_note_queue_drop(event_buffer);
+    } else {
+      board_a_event_buffer_note_queue_full(event_buffer);
+      break;
+    }
+  }
+  runtime_unlock(runtime);
+  return accepted;
+}
+
 void board_a_runtime_requeue_record(
     board_a_runtime_t *runtime,
     const board_a_record_format_record_t *record)
@@ -312,6 +449,127 @@ void board_a_runtime_complete_drain(board_a_runtime_t *runtime,
   }
   board_a_model_complete_drain(&runtime->slave.model, generation, success);
   runtime_unlock(runtime);
+}
+
+bool board_a_runtime_complete_event_stop_flush(board_a_runtime_t *runtime)
+{
+  bool completed = false;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  completed = board_a_model_complete_event_stop_flush(&runtime->slave.model);
+  runtime_unlock(runtime);
+  return completed;
+}
+
+bool board_a_runtime_copy_event_marker(
+    board_a_runtime_t *runtime, bool *open, uint32_t *event_id,
+    uint64_t *event_start_us)
+{
+  bool copied;
+
+  if ((open == NULL) || (event_id == NULL) || (event_start_us == NULL) ||
+      !runtime_lock(runtime)) {
+    return false;
+  }
+  copied = board_a_model_copy_event_marker(
+      &runtime->slave.model, open, event_id, event_start_us);
+  runtime_unlock(runtime);
+  return copied;
+}
+
+void board_a_runtime_set_event_marker(
+    board_a_runtime_t *runtime, bool open, uint32_t event_id,
+    uint64_t event_start_us)
+{
+  if (!runtime_lock(runtime)) {
+    return;
+  }
+  board_a_model_set_event_marker(
+      &runtime->slave.model, open, event_id, event_start_us);
+  runtime_unlock(runtime);
+}
+
+bool board_a_runtime_event_marker_dirty(board_a_runtime_t *runtime)
+{
+  bool dirty;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  dirty = board_a_model_event_marker_dirty(&runtime->slave.model);
+  runtime_unlock(runtime);
+  return dirty;
+}
+
+bool board_a_runtime_request_event_marker_save(
+    board_a_runtime_t *runtime, uint32_t command_id)
+{
+  board_a_model_t *model;
+  board_a_persisted_config_t config;
+  board_a_save_accept_result_t result;
+  uint8_t index;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  model = &runtime->slave.model;
+  memset(&config, 0, sizeof(config));
+  config.period_sec = model->active_config.config.period_sec;
+  config.channel_mask = model->active_config.config.channel_mask;
+  config.record_count = model->active_config.config.record_count;
+  config.alarm = model->active_config.alarm_config;
+  config.event_open = model->event_marker_open;
+  config.event_id = model->event_marker_id;
+  config.event_start_us = model->event_marker_start_us;
+  config.sensor_valid_mask = model->sensor_map.valid_mask;
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    memcpy(config.sensor_roms[index], model->sensor_map.bindings[index].rom,
+           DS18B20_ROM_SIZE);
+  }
+  result = board_a_persistence_accept_save(
+      &model->persistence, &config, model->active_config.version, command_id);
+  runtime_unlock(runtime);
+  return result == BOARD_A_SAVE_ACCEPT_OK;
+}
+
+bool board_a_runtime_recover_incomplete_event(board_a_runtime_t *runtime)
+{
+  board_a_event_buffer_record_t close_record;
+  board_a_model_t *model;
+  bool recovered = false;
+
+  if (!runtime_lock(runtime)) {
+    return false;
+  }
+  model = &runtime->slave.model;
+  if (!model->event_marker_open) {
+    runtime_unlock(runtime);
+    return false;
+  }
+
+  memset(&close_record, 0, sizeof(close_record));
+  close_record.event_id = model->event_marker_id;
+  close_record.phase = BOARD_A_EVENT_PHASE_CLOSE;
+  close_record.time_us = model->event_marker_start_us;
+  close_record.time_ms = model->event_marker_start_us / 1000ULL;
+  close_record.level = BOARD_A_ALARM_UNKNOWN;
+  close_record.reason = BOARD_A_ALARM_REASON_NONE;
+  close_record.alarm_phase = BOARD_A_ALARM_PHASE_NONE;
+  close_record.flags = BOARD_A_EVENT_FLAG_INCOMPLETE |
+      BOARD_A_EVENT_FLAG_FORCED_CLOSE;
+  close_record.quality[0] = BOARD_A_QUALITY_NOT_PRESENT;
+  close_record.quality[1] = BOARD_A_QUALITY_NOT_PRESENT;
+  close_record.quality[2] = BOARD_A_QUALITY_NOT_PRESENT;
+
+  if (board_a_model_enqueue_event_record(model, &close_record) ==
+      BOARD_A_EVENT_ENQUEUE_OK) {
+    board_a_model_set_event_marker(model, false, 0U, 0U);
+    recovered = true;
+  }
+  runtime_unlock(runtime);
+  return recovered;
 }
 
 bool board_a_runtime_persistence_status(

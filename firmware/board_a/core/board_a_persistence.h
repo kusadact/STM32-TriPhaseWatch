@@ -5,7 +5,7 @@
 
 #include "board_a_record_format.h"
 
-#define BOARD_A_PERSISTENCE_CONTRACT_REVISION 1U
+#define BOARD_A_PERSISTENCE_CONTRACT_REVISION 2U
 #define BOARD_A_RECORD_QUEUE_CAPACITY 32U
 #define BOARD_A_STORAGE_OPERATION_TIMEOUT_MS 2000U
 #define BOARD_A_STORAGE_RETRY_PERIOD_MS 5000U
@@ -103,6 +103,7 @@ typedef struct {
   uint32_t generated;
   uint32_t synced;
   uint32_t dropped;
+  uint32_t event_dropped;
   uint32_t uncertain;
   uint32_t storage_errors;
   uint32_t drain_generation;
@@ -136,6 +137,7 @@ typedef struct {
   uint32_t generated;
   uint32_t synced;
   uint32_t dropped;
+  uint32_t event_dropped;
   uint32_t uncertain;
   uint16_t in_flight;
   uint16_t drain_state;
@@ -172,6 +174,13 @@ void board_a_persistence_note_load(
 int board_a_persistence_queue_push(
     board_a_persistence_t *persistence,
     const board_a_record_format_record_t *record);
+
+int board_a_persistence_queue_push_event(
+    board_a_persistence_t *persistence,
+    const board_a_record_format_record_t *record);
+
+void board_a_persistence_note_event_drop(
+    board_a_persistence_t *persistence);
 
 int board_a_persistence_queue_pop(
     board_a_persistence_t *persistence,

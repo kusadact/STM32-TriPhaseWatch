@@ -31,7 +31,7 @@ BASE_UTC = int(
 SECOND_SET_TIME_LEAD_S = 5.0
 
 
-def valid_identity() -> dict[str, Any]:
+def valid_identity(csv_schema: int = 2) -> dict[str, Any]:
     return validate_identity(
         {
             "baseline_sha": "8" * 40,
@@ -50,7 +50,7 @@ def valid_identity() -> dict[str, Any]:
             "contract": {
                 "protocol_version": 3,
                 "contract_revision": 1,
-                "csv_schema": 2,
+                "csv_schema": csv_schema,
             },
         }
     )
@@ -132,6 +132,14 @@ def record_values(
         "file_id": file_id,
         "file_date": file_date,
         "reserved": 0,
+        "event_id": 0,
+        "event_phase": 0,
+        "event_level": 0,
+        "event_reason": 0,
+        "event_trigger_phase": 0,
+        "event_max_delta_x16": 0,
+        "event_delta_valid": 0,
+        "event_flags": 0,
     }
     for name in oracle.CSV_DHT11_COLUMNS:
         values[name] = 0
@@ -152,13 +160,15 @@ def csv_bytes(records: Iterable[Mapping[str, int]]) -> bytes:
     if not rows:
         return (oracle.CSV_HEADER + "\n").encode("ascii")
     schemas = [int(record["schema"]) for record in rows]
-    schema = next((value for value in schemas if value in (1, 2, 3)), 2)
+    schema = next((value for value in schemas if value in (1, 2, 3, 4)), 2)
     if schema == 1:
         columns = oracle.CSV_SCHEMA1_COLUMNS
     elif schema == 2:
         columns = oracle.CSV_COLUMNS
     elif schema == 3:
         columns = oracle.CSV_SCHEMA3_COLUMNS
+    elif schema == 4:
+        columns = oracle.CSV_SCHEMA4_COLUMNS
     else:
         raise ValueError(f"unsupported CSV schema {schema}")
     encoded_rows = [
@@ -169,6 +179,7 @@ def csv_bytes(records: Iterable[Mapping[str, int]]) -> bytes:
         1: oracle.CSV_SCHEMA1_HEADER,
         2: oracle.CSV_SCHEMA2_HEADER,
         3: oracle.CSV_SCHEMA3_HEADER,
+        4: oracle.CSV_SCHEMA4_HEADER,
     }[schema]
     return ("\n".join([header, *encoded_rows]) + "\n").encode("ascii")
 
@@ -215,6 +226,7 @@ def make_valid_fixture(
     observed_duration_s: float = 9.0,
     completion_reason: str = "finite_count_completed",
     include_repeated_poll: bool = True,
+    schema: int = 2,
 ) -> tuple[Path, Path]:
     run_dir = root / "run"
     files_dir = root / "files"
@@ -259,13 +271,14 @@ def make_valid_fixture(
                 file_date=file_date,
                 planned_ms=planned_ms,
                 actual_ms=actual_ms,
+                schema=schema,
             )
         )
     data = csv_bytes(records)
     file_path.write_bytes(data)
     digest = hashlib.sha256(data).hexdigest()
 
-    identity = valid_identity()
+    identity = valid_identity(csv_schema=schema)
     started = "2026-09-20T04:00:00+00:00"
     ended = "2026-09-20T04:00:09+00:00"
     write_json(

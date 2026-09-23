@@ -29,6 +29,7 @@ class FakeBackend:
         self.start_results: deque[Any] = deque()
         self.stop_results: deque[Any] = deque()
         self.single_results: deque[Any] = deque()
+        self.ack_results: deque[Any] = deque()
         self.identity_payload = {
             "device_type": 1,
             "reported_version": "1.8.0",
@@ -49,6 +50,8 @@ class FakeBackend:
             "source": "REAL_DS18B20",
             "sensors": [],
         }
+        self.alarm_payload: Any = None
+        self.alarm_error: Any = None
         self.sensor_error: Any = None
         self.storage_payload: Any = {
             "storage_state_name": "READY",
@@ -97,7 +100,9 @@ class FakeBackend:
             {
                 "status": self.status_payload,
                 "temperature_snapshot": self.temperature_payload,
+                "thermal_alarm": self.alarm_payload,
                 "sensor_error": self.sensor_error,
+                "alarm_error": self.alarm_error,
             },
         )
 
@@ -154,7 +159,24 @@ class FakeBackend:
                     },
                 },
                 "temperature_snapshot": self.temperature_payload,
+                "thermal_alarm": self.alarm_payload,
                 "sensor_error": self.sensor_error,
+                "alarm_error": self.alarm_error,
+            },
+        )
+
+    def ack_alarm(self) -> dict[str, Any]:
+        self._record("ack_alarm")
+        return _take(
+            self.ack_results,
+            {
+                "command_id": 1,
+                "duplicate": False,
+                "thermal_alarm": self.alarm_payload,
+                "acknowledged": bool(
+                    isinstance(self.alarm_payload, dict)
+                    and self.alarm_payload.get("acknowledged", False)
+                ),
             },
         )
 

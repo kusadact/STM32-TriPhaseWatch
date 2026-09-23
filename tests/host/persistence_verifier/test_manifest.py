@@ -16,6 +16,12 @@ class ManifestTests(unittest.TestCase):
     def test_valid_identity_passes(self) -> None:
         self.assertEqual(validate_identity(valid_identity())["contract"]["csv_schema"], 2)
 
+    def test_schema4_identity_passes(self) -> None:
+        self.assertEqual(
+            validate_identity(valid_identity(csv_schema=4))["contract"]["csv_schema"],
+            4,
+        )
+
     def test_missing_candidate_identity_is_rejected(self) -> None:
         identity = valid_identity()
         del identity["candidate_sha"]

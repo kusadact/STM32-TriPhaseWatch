@@ -12,6 +12,7 @@ from typing import Callable
 from fixture_factory import (
     BASE_UTC,
     make_valid_fixture,
+    record_values,
     rewrite_csv,
 )
 from persistence import oracle
@@ -35,7 +36,22 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 def _read_records(path: Path) -> list[dict[str, int]]:
     parsed = oracle.parse_csv_bytes(path.read_bytes(), "LOG/20260920/00000001.CSV")
-    return [dict(zip(oracle.CSV_COLUMNS, record.values)) for record in parsed.records]
+    return [
+        {
+            name: value
+            for name, value in zip(
+                oracle.CSV_SCHEMA4_COLUMNS
+                if record.schema == 4
+                else oracle.CSV_SCHEMA3_COLUMNS
+                if record.schema == 3
+                else oracle.CSV_SCHEMA2_COLUMNS
+                if record.schema == 2
+                else oracle.CSV_SCHEMA1_COLUMNS,
+                record.values,
+            )
+        }
+        for record in parsed.records
+    ]
 
 
 def _refresh_manifest(run_dir: Path, files_dir: Path, relative: str) -> None:
@@ -87,6 +103,102 @@ class VerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_dir, files_dir = make_valid_fixture(root)
+            report = self._verify(root, run_dir, files_dir)
+            self.assertEqual(report.exit_code, 0, report.issues)
+            self.assertEqual(report.overall, "PASS")
+
+    def test_schema4_normal_fixture_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, files_dir = make_valid_fixture(root, schema=4)
+            report = self._verify(root, run_dir, files_dir)
+            self.assertEqual(report.exit_code, 0, report.issues)
+            self.assertEqual(report.overall, "PASS")
+
+    def test_schema4_event_row_passes_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir, files_dir = make_valid_fixture(
+                root,
+                record_count=2,
+                period_s=30,
+                mask=1,
+                schema=4,
+            )
+            relative = "LOG/20260920/00000001.CSV"
+            path = files_dir / relative
+            records = _read_records(path)
+            planned_ms = 1_000_000 + ((30 * 1000) + 5)
+            event_row = record_values(
+                seq=2,
+                session=1,
+                trigger=0,
+                period_s=30,
+                mask=1,
+                sample_count=0,
+                config_version=1,
+                utc_valid=1,
+                utc_s=BASE_UTC + 30,
+                file_id=1,
+                file_date=20260920,
+                planned_ms=planned_ms,
+                actual_ms=planned_ms,
+                schema=4,
+            )
+            event_row["source"] = 3
+            for index in range(4):
+                event_row[f"v{index}"] = 0
+                event_row[f"u{index}"] = 2
+                event_row[f"q{index}"] = 0
+            event_row.update(
+                {
+                    "ds18b20_valid_mask": 7,
+                    "ds18b20_sample_id": 2,
+                    "ds18b20_0_temp_x16": 400,
+                    "ds18b20_1_temp_x16": 400,
+                    "ds18b20_2_temp_x16": 400,
+                    "ds18b20_0_quality": 1,
+                    "ds18b20_1_quality": 1,
+                    "ds18b20_2_quality": 1,
+                    "ds18b20_0_error": 0,
+                    "ds18b20_1_error": 0,
+                    "ds18b20_2_error": 0,
+                    "ds18b20_0_rom_short": 0,
+                    "ds18b20_1_rom_short": 0,
+                    "ds18b20_2_rom_short": 0,
+                    "ds18b20_0_sample_ms": 0,
+                    "ds18b20_1_sample_ms": 0,
+                    "ds18b20_2_sample_ms": 0,
+                    "event_id": 3,
+                    "event_phase": 2,
+                    "event_level": 2,
+                    "event_reason": 2,
+                    "event_trigger_phase": 1,
+                    "event_max_delta_x16": 0,
+                    "event_delta_valid": 0,
+                    "event_flags": 0,
+                }
+            )
+            records[1] = event_row
+            rewrite_csv(files_dir, relative, records)
+            _refresh_manifest(run_dir, files_dir, relative)
+            observations_path = run_dir / "observations.jsonl"
+            observations = [
+                json.loads(line)
+                for line in observations_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            observations = [
+                row
+                for row in observations
+                if not (
+                    row.get("kind") == "snapshot"
+                    and isinstance(row.get("value"), dict)
+                    and row["value"].get("sequence") == 2
+                )
+            ]
+            _write_jsonl(observations_path, observations)
             report = self._verify(root, run_dir, files_dir)
             self.assertEqual(report.exit_code, 0, report.issues)
             self.assertEqual(report.overall, "PASS")
@@ -406,7 +518,7 @@ class VerifierTests(unittest.TestCase):
 
         def unknown_schema(run_dir: Path, files_dir: Path) -> None:
             def mutate(records: list[dict[str, int]]) -> list[dict[str, int]]:
-                records[1]["schema"] = 4
+                records[1]["schema"] = 5
                 return records
 
             _mutate_records(run_dir, files_dir, mutate)

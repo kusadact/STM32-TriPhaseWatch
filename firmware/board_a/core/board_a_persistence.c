@@ -30,7 +30,8 @@ board_a_save_accept_result_t board_a_persistence_accept_save(
   if ((config->period_sec < BOARD_A_PERIOD_MIN_SEC) ||
       (config->period_sec > BOARD_A_PERIOD_MAX_SEC) ||
       (config->channel_mask < BOARD_A_CHANNEL_MASK_MIN) ||
-      (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX)) {
+      (config->channel_mask > BOARD_A_CHANNEL_MASK_MAX) ||
+      !board_a_alarm_validate_config(&config->alarm)) {
     return BOARD_A_SAVE_ACCEPT_INVALID;
   }
   if (persistence->save.state == BOARD_A_SAVE_PENDING) {
@@ -117,6 +118,28 @@ int board_a_persistence_queue_push(
     persistence->storage.high_water = persistence->storage.count;
   }
   return 1;
+}
+
+int board_a_persistence_queue_push_event(
+    board_a_persistence_t *persistence,
+    const board_a_record_format_record_t *record)
+{
+  if ((persistence == NULL) || (record == NULL) ||
+      !board_a_record_format_is_valid(record)) {
+    return 0;
+  }
+  if (persistence->storage.count >= BOARD_A_RECORD_QUEUE_CAPACITY) {
+    return 0;
+  }
+  return board_a_persistence_queue_push(persistence, record);
+}
+
+void board_a_persistence_note_event_drop(
+    board_a_persistence_t *persistence)
+{
+  if (persistence != NULL) {
+    persistence->storage.event_dropped++;
+  }
 }
 
 int board_a_persistence_queue_pop(
@@ -275,6 +298,7 @@ void board_a_persistence_status(
   status->generated = storage->generated;
   status->synced = storage->synced;
   status->dropped = storage->dropped;
+  status->event_dropped = storage->event_dropped;
   status->uncertain = storage->uncertain;
   status->in_flight = storage->in_flight;
   status->drain_state = (uint16_t)storage->drain_state;

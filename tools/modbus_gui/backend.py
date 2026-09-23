@@ -24,6 +24,8 @@ class GuiBackend(Protocol):
 
     def single_sample(self, command_id: int) -> dict[str, Any]: ...
 
+    def ack_alarm(self) -> dict[str, Any]: ...
+
     def refresh_storage(self) -> dict[str, Any]: ...
 
 
@@ -98,17 +100,27 @@ class ModbusServiceBackend:
         service = self._require_service()
         status = service.status()
         temperature_snapshot = None
+        thermal_alarm = None
         sensor_error = None
+        alarm_error = None
         try:
-            temperature_snapshot = self._read_temperature_snapshot(service)
+            thermal_state = self._read_thermal_state(service)
+            temperature_snapshot = thermal_state.get("temperature_snapshot")
+            thermal_alarm = thermal_state.get("thermal_alarm")
+            if thermal_alarm is None:
+                thermal_alarm = thermal_state.get("alarm")
+            alarm_error = thermal_state.get("alarm_error")
         except UnsupportedProtocolError as exc:
             if not exc.details.get("interface_unavailable"):
                 raise
             sensor_error = exc.as_error()
+            alarm_error = sensor_error
         return {
             "status": status,
             "temperature_snapshot": temperature_snapshot,
+            "thermal_alarm": thermal_alarm,
             "sensor_error": sensor_error,
+            "alarm_error": alarm_error,
         }
 
     def read_temperature_snapshot(self) -> dict[str, Any]:
@@ -123,6 +135,28 @@ class ModbusServiceBackend:
                 interface_unavailable=True,
             )
         return method()
+
+    def _read_thermal_state(self, service: Any) -> dict[str, Any]:
+        method = getattr(service, "read_thermal_state", None)
+        if callable(method):
+            return method()
+
+        temperature_snapshot = self._read_temperature_snapshot(service)
+        thermal_alarm = None
+        alarm_error = None
+        alarm_method = getattr(service, "read_thermal_alarm", None)
+        if callable(alarm_method):
+            try:
+                thermal_alarm = alarm_method()
+            except UnsupportedProtocolError as exc:
+                if not exc.details.get("interface_unavailable"):
+                    raise
+                alarm_error = exc.as_error()
+        return {
+            "temperature_snapshot": temperature_snapshot,
+            "thermal_alarm": thermal_alarm,
+            "alarm_error": alarm_error,
+        }
 
     def start_periodic(self, period_sec: int) -> dict[str, Any]:
         if not 10 <= period_sec <= 3600:
@@ -177,18 +211,38 @@ class ModbusServiceBackend:
         service = self._require_service()
         command = service.single(command_id)
         temperature_snapshot = None
+        thermal_alarm = None
         sensor_error = None
+        alarm_error = None
         try:
-            temperature_snapshot = self._read_temperature_snapshot(service)
+            thermal_state = self._read_thermal_state(service)
+            temperature_snapshot = thermal_state.get("temperature_snapshot")
+            thermal_alarm = thermal_state.get("thermal_alarm")
+            if thermal_alarm is None:
+                thermal_alarm = thermal_state.get("alarm")
+            alarm_error = thermal_state.get("alarm_error")
         except UnsupportedProtocolError as exc:
             if not exc.details.get("interface_unavailable"):
                 raise
             sensor_error = exc.as_error()
+            alarm_error = sensor_error
         return {
             "command": command,
             "temperature_snapshot": temperature_snapshot,
+            "thermal_alarm": thermal_alarm,
             "sensor_error": sensor_error,
+            "alarm_error": alarm_error,
         }
+
+    def ack_alarm(self) -> dict[str, Any]:
+        service = self._require_service()
+        method = getattr(service, "ack_alarm", None)
+        if not callable(method):
+            raise UnsupportedProtocolError(
+                "当前 service 没有 ack_alarm()；无法确认热告警",
+                interface_unavailable=True,
+            )
+        return method()
 
     def refresh_storage(self) -> dict[str, Any]:
         return self._require_service().storage_status()

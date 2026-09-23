@@ -13,6 +13,12 @@
     }                                                                          \
   } while (0)
 
+static void persisted_config_defaults(board_a_persisted_config_t *config)
+{
+  memset(config, 0, sizeof(*config));
+  board_a_alarm_default_config(&config->alarm);
+}
+
 typedef struct {
   uint8_t memory[FAKE_MEMORY_SIZE];
   uint8_t read_error_mask;
@@ -327,13 +333,23 @@ static int test_business_payload_torn_write_preserves_old_slot(void)
   fake_backend_t backend;
   config_store_t store;
   config_store_metadata_t metadata;
-  board_a_persisted_config_t first = {10U, 0x0001U, 0U, 0U, {{0U}}};
-  board_a_persisted_config_t second = {30U, 0x000FU, 5U, 0U, {{0U}}};
+  board_a_persisted_config_t first;
+  board_a_persisted_config_t second;
   board_a_persisted_config_t decoded;
   uint8_t first_payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
   uint8_t second_payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
   uint8_t payload[CONFIG_STORE_PAYLOAD_MAX_BYTES];
 
+  persisted_config_defaults(&first);
+  persisted_config_defaults(&second);
+  first.period_sec = 10U;
+  first.channel_mask = 0x0001U;
+  second.period_sec = 30U;
+  second.channel_mask = 0x000FU;
+  second.record_count = 5U;
+  second.alarm.delta_notice_x16 = 96;
+  second.alarm.delta_warning_x16 = 176;
+  second.alarm.delta_critical_x16 = 256;
   fake_reset(&backend);
   backend.validation_enabled = 1U;
   backend.rejected_first_byte = 0xEEU;

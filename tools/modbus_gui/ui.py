@@ -8,7 +8,14 @@ from typing import Callable
 
 from .backend import ModbusServiceBackend
 from .controller import GuiController
-from .model import SENSOR_LAYOUT, ConnectionState
+from .model import (
+    ALARM_COLORS,
+    ALARM_FOREGROUNDS,
+    PHASE_CARD_TITLES,
+    SENSOR_LAYOUT,
+    AlarmLevel,
+    ConnectionState,
+)
 from .ports import list_serial_ports
 
 
@@ -31,7 +38,7 @@ class GuiApplication:
 
         self.port_var = tk.StringVar()
         self.address_var = tk.StringVar(value="1")
-        self.period_var = tk.StringVar(value="10")
+        self.period_var = tk.StringVar(value="30")
         self.connection_var = tk.StringVar(value="未连接")
         self.identity_var = tk.StringVar(value="设备: --")
         self.error_var = tk.StringVar(value="最近错误: --")
@@ -56,6 +63,7 @@ class GuiApplication:
                 "generated",
                 "synced",
                 "dropped",
+                "event_dropped",
                 "uncertain",
                 "queued",
                 "in_flight",
@@ -73,6 +81,26 @@ class GuiApplication:
             }
             for _index in range(3)
         ]
+        self.alarm_vars = {
+            key: tk.StringVar(value="--")
+            for key in (
+                "level",
+                "reason",
+                "trigger_phase",
+                "maximum_delta",
+                "hottest_temperature",
+                "buzzer",
+                "acknowledged",
+                "event_time",
+                "duration",
+                "event_id",
+                "sample_id",
+                "notice_count",
+                "warning_count",
+                "critical_count",
+                "sensor_fault_count",
+            )
+        }
 
         self._build_window()
         self._refresh_ports()
@@ -82,9 +110,9 @@ class GuiApplication:
 
     def _build_window(self) -> None:
         self.root.title("STM32 板 A DS18B20 温度监控")
-        self.root.minsize(1040, 720)
+        self.root.minsize(1040, 820)
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(4, weight=1)
+        self.root.rowconfigure(5, weight=1)
 
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
@@ -95,6 +123,7 @@ class GuiApplication:
 
         self._build_connection_bar()
         self._build_cards()
+        self._build_alarm_panel()
         self._build_statistics()
         self._build_control_area()
         self._build_footer()
@@ -186,7 +215,9 @@ class GuiApplication:
         for column in range(3):
             frame.columnconfigure(column, weight=1, uniform="sensor")
 
-        for column, title, location in SENSOR_LAYOUT:
+        self.card_status_labels: list[tk.Label] = []
+        for column, _sensor_id, location in SENSOR_LAYOUT:
+            title = PHASE_CARD_TITLES[column]
             card = ttk.LabelFrame(frame, text=title)
             card.grid(
                 row=0,
@@ -196,8 +227,24 @@ class GuiApplication:
                 pady=6,
             )
             card.columnconfigure(1, weight=1)
-            ttk.Label(card, text=location).grid(
+            status = tk.Label(
+                card,
+                text=title,
+                anchor="w",
+                padx=8,
+                pady=3,
+                background=ALARM_COLORS[AlarmLevel.UNKNOWN],
+                foreground=ALARM_FOREGROUNDS[AlarmLevel.UNKNOWN],
+            )
+            status.grid(
                 row=0,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+            )
+            self.card_status_labels.append(status)
+            ttk.Label(card, text=location).grid(
+                row=1,
                 column=0,
                 columnspan=2,
                 sticky="w",
@@ -205,7 +252,7 @@ class GuiApplication:
                 pady=(6, 4),
             )
             ttk.Label(card, text="温度").grid(
-                row=1,
+                row=2,
                 column=0,
                 sticky="w",
                 padx=8,
@@ -215,19 +262,8 @@ class GuiApplication:
                 card,
                 textvariable=self.card_vars[column]["temperature"],
                 style="CardValue.TLabel",
-            ).grid(row=1, column=1, sticky="e", padx=8, pady=3)
-            ttk.Label(card, text="ROM 短标识").grid(
-                row=2,
-                column=0,
-                sticky="w",
-                padx=8,
-                pady=3,
-            )
-            ttk.Label(
-                card,
-                textvariable=self.card_vars[column]["rom"],
             ).grid(row=2, column=1, sticky="e", padx=8, pady=3)
-            ttk.Label(card, text="quality").grid(
+            ttk.Label(card, text="ROM 短标识").grid(
                 row=3,
                 column=0,
                 sticky="w",
@@ -236,9 +272,9 @@ class GuiApplication:
             )
             ttk.Label(
                 card,
-                textvariable=self.card_vars[column]["quality"],
+                textvariable=self.card_vars[column]["rom"],
             ).grid(row=3, column=1, sticky="e", padx=8, pady=3)
-            ttk.Label(card, text="采样时间(ms)").grid(
+            ttk.Label(card, text="quality").grid(
                 row=4,
                 column=0,
                 sticky="w",
@@ -247,10 +283,21 @@ class GuiApplication:
             )
             ttk.Label(
                 card,
-                textvariable=self.card_vars[column]["sample_time"],
+                textvariable=self.card_vars[column]["quality"],
             ).grid(row=4, column=1, sticky="e", padx=8, pady=3)
-            ttk.Label(card, text="更新时间").grid(
+            ttk.Label(card, text="采样时间(ms)").grid(
                 row=5,
+                column=0,
+                sticky="w",
+                padx=8,
+                pady=3,
+            )
+            ttk.Label(
+                card,
+                textvariable=self.card_vars[column]["sample_time"],
+            ).grid(row=5, column=1, sticky="e", padx=8, pady=3)
+            ttk.Label(card, text="更新时间").grid(
+                row=6,
                 column=0,
                 sticky="w",
                 padx=8,
@@ -259,11 +306,85 @@ class GuiApplication:
             ttk.Label(
                 card,
                 textvariable=self.card_vars[column]["updated_at"],
-            ).grid(row=5, column=1, sticky="e", padx=8, pady=(3, 8))
+            ).grid(row=6, column=1, sticky="e", padx=8, pady=(3, 8))
+
+    def _build_alarm_panel(self) -> None:
+        frame = ttk.LabelFrame(self.root, text="三相热告警")
+        frame.grid(row=2, column=0, sticky="ew", padx=12, pady=6)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(3, weight=1)
+
+        self.alarm_banner = tk.Label(
+            frame,
+            textvariable=self.alarm_vars["level"],
+            anchor="w",
+            padx=10,
+            pady=7,
+            background=ALARM_COLORS[AlarmLevel.UNKNOWN],
+            foreground=ALARM_FOREGROUNDS[AlarmLevel.UNKNOWN],
+        )
+        self.alarm_banner.grid(
+            row=0,
+            column=0,
+            columnspan=4,
+            sticky="ew",
+            padx=8,
+            pady=(7, 5),
+        )
+
+        fields = (
+            ("原因", "reason"),
+            ("触发相", "trigger_phase"),
+            ("最大温差", "maximum_delta"),
+            ("热点温度", "hottest_temperature"),
+            ("蜂鸣器", "buzzer"),
+            ("确认状态", "acknowledged"),
+            ("事件时间", "event_time"),
+            ("持续时间", "duration"),
+            ("事件 ID", "event_id"),
+            ("alarm sample_id", "sample_id"),
+            ("Notice 计数", "notice_count"),
+            ("Warning 计数", "warning_count"),
+            ("Critical 计数", "critical_count"),
+            ("Sensor Fault 计数", "sensor_fault_count"),
+        )
+        for index, (label, key) in enumerate(fields):
+            row = 1 + (index // 2)
+            column = (index % 2) * 2
+            ttk.Label(frame, text=label).grid(
+                row=row,
+                column=column,
+                sticky="w",
+                padx=(8, 4),
+                pady=3,
+            )
+            ttk.Label(
+                frame,
+                textvariable=self.alarm_vars[key],
+            ).grid(
+                row=row,
+                column=column + 1,
+                sticky="w",
+                padx=(0, 8),
+                pady=3,
+            )
+        self.ack_button = ttk.Button(
+            frame,
+            text="确认告警",
+            command=self.controller.ack_alarm,
+        )
+        self.ack_button.grid(
+            row=1 + (len(fields) // 2),
+            column=0,
+            columnspan=4,
+            sticky="e",
+            padx=8,
+            pady=(7, 8),
+        )
 
     def _build_statistics(self) -> None:
         frame = ttk.LabelFrame(self.root, text="有效节点统计")
-        frame.grid(row=2, column=0, sticky="ew", padx=12, pady=6)
+        frame.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
         fields = (
             ("温度最小", "minimum_temperature"),
             ("温度最大", "maximum_temperature"),
@@ -299,7 +420,7 @@ class GuiApplication:
 
     def _build_control_area(self) -> None:
         container = ttk.Frame(self.root)
-        container.grid(row=3, column=0, sticky="nsew", padx=12, pady=6)
+        container.grid(row=4, column=0, sticky="nsew", padx=12, pady=6)
         container.columnconfigure(0, weight=1)
         container.columnconfigure(1, weight=1)
 
@@ -403,6 +524,7 @@ class GuiApplication:
             ("generated", "generated"),
             ("synced", "synced"),
             ("dropped", "dropped"),
+            ("事件丢弃", "event_dropped"),
             ("uncertain", "uncertain"),
             ("queued", "queued"),
             ("in-flight", "in_flight"),
@@ -445,7 +567,7 @@ class GuiApplication:
 
     def _build_footer(self) -> None:
         frame = ttk.Frame(self.root)
-        frame.grid(row=4, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        frame.grid(row=5, column=0, sticky="nsew", padx=12, pady=(0, 12))
         frame.columnconfigure(0, weight=1)
         ttk.Label(
             frame,
@@ -538,6 +660,63 @@ class GuiApplication:
             stats.participating_sensor_text
         )
 
+        alarm = state.alarm
+        if alarm is None:
+            alarm_values = {
+                "level": "UNKNOWN / 未知",
+                "reason": "--",
+                "trigger_phase": "--",
+                "maximum_delta": "--",
+                "hottest_temperature": "--",
+                "buzzer": "--",
+                "acknowledged": "--",
+                "event_time": "--",
+                "duration": "--",
+                "event_id": "--",
+                "sample_id": "--",
+                "notice_count": "--",
+                "warning_count": "--",
+                "critical_count": "--",
+                "sensor_fault_count": "--",
+            }
+            alarm_color = ALARM_COLORS[AlarmLevel.UNKNOWN]
+            alarm_foreground = ALARM_FOREGROUNDS[AlarmLevel.UNKNOWN]
+        else:
+            alarm_values = {
+                "level": f"{alarm.level.value} / {alarm.level_label}",
+                "reason": alarm.reason_label,
+                "trigger_phase": alarm.trigger_phase_label,
+                "maximum_delta": alarm.maximum_delta_text,
+                "hottest_temperature": alarm.hottest_temperature_text,
+                "buzzer": alarm.buzzer_text,
+                "acknowledged": alarm.acknowledged_text,
+                "event_time": alarm.event_time_text,
+                "duration": alarm.duration_text,
+                "event_id": str(alarm.event_id),
+                "sample_id": str(alarm.alarm_sample_id),
+                "notice_count": str(alarm.notice_count),
+                "warning_count": str(alarm.warning_count),
+                "critical_count": str(alarm.critical_count),
+                "sensor_fault_count": str(alarm.sensor_fault_count),
+            }
+            alarm_color = alarm.color
+            alarm_foreground = alarm.foreground
+        for key, value in alarm_values.items():
+            self.alarm_vars[key].set(value)
+        self.alarm_banner.configure(
+            background=alarm_color,
+            foreground=alarm_foreground,
+        )
+        for index, label in enumerate(self.card_status_labels):
+            label.configure(
+                background=alarm_color,
+                foreground=alarm_foreground,
+                text=(
+                    f"{PHASE_CARD_TITLES[index]} / "
+                    f"{alarm.level.value if alarm is not None else 'UNKNOWN'}"
+                ),
+            )
+
         self.acquisition_var.set(state.acquisition_text)
         self.completed_var.set(str(state.completed_count))
         self.failed_var.set(str(state.failed_count))
@@ -585,6 +764,7 @@ class GuiApplication:
         self._set_enabled(self.start_button, availability.start_periodic)
         self._set_enabled(self.stop_button, availability.stop_periodic)
         self._set_enabled(self.storage_button, availability.refresh_storage)
+        self._set_enabled(self.ack_button, availability.ack_alarm)
 
     @staticmethod
     def _set_enabled(widget: ttk.Widget, enabled: bool) -> None:

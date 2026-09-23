@@ -229,7 +229,9 @@ static int command(board_a_slave_t *slave, uint16_t command_code)
                       BOARD_A_HOLDING_COMMAND, command_code);
 }
 
-static int submit_single(board_a_slave_t *slave, uint32_t command_id)
+static int submit_command_with_id(board_a_slave_t *slave,
+                                  uint16_t command_code,
+                                  uint32_t command_id)
 {
   uint16_t id_values[2];
 
@@ -239,7 +241,12 @@ static int submit_single(board_a_slave_t *slave, uint32_t command_id)
                       id_values, 2U)) {
     return 0;
   }
-  return command(slave, BOARD_A_COMMAND_SINGLE);
+  return command(slave, command_code);
+}
+
+static int submit_single(board_a_slave_t *slave, uint32_t command_id)
+{
+  return submit_command_with_id(slave, BOARD_A_COMMAND_SINGLE, command_id);
 }
 
 static void test_crc_standard_vector(void)
@@ -258,7 +265,7 @@ static void test_normal_reads(void)
   board_a_slave_init(&slave, 0x00000001U);
   CHECK(read_registers(&slave, 0x03U, BOARD_A_HOLDING_CFG_PERIOD_SEC,
                        3U, values));
-  CHECK(values[0] == 10U);
+  CHECK(values[0] == 30U);
   CHECK(values[1] == 0x0001U);
   CHECK(values[2] == 0U);
 
@@ -877,6 +884,261 @@ static void test_frame_separation(void)
                            sizeof(response)) == second_length - 1U);
 }
 
+static void test_alarm_register_contract(void)
+{
+  board_a_slave_t slave;
+  board_a_alarm_state_t state;
+  uint16_t values[29];
+  uint8_t request[8];
+  size_t request_length;
+
+  board_a_slave_init(&slave, 0x0000000EU);
+  memset(&state, 0, sizeof(state));
+  state.valid = true;
+  state.sample_id = 0x11223344U;
+  state.level = BOARD_A_ALARM_WARNING;
+  state.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  state.trigger_phase = BOARD_A_ALARM_PHASE_C;
+  state.delta_valid = true;
+  state.maximum_delta_x16 = 160;
+  state.hottest_temperature_x16 = 880;
+  state.hottest_phase = BOARD_A_ALARM_PHASE_A;
+  state.temperature_x16[0] = 880;
+  state.temperature_x16[1] = -160;
+  state.temperature_x16[2] = 750;
+  state.quality[0] = BOARD_A_QUALITY_OK;
+  state.quality[1] = BOARD_A_QUALITY_STALE;
+  state.quality[2] = BOARD_A_QUALITY_CRC_ERROR;
+  state.latched = true;
+  state.buzzer_enable = true;
+  state.event_id = 0x01020304U;
+  state.duration_sec = 0x05060708U;
+  state.notice_count = 0x11111111U;
+  state.warning_count = 0x22222222U;
+  state.critical_count = 0x33333333U;
+  state.sensor_fault_count = 0x44444444U;
+  board_a_model_publish_alarm_state(&slave.model, &state);
+  board_a_model_set_alarm_buzzer_active(&slave.model, true);
+
+  CHECK(read_registers(&slave, 0x04U,
+                       BOARD_A_INPUT_ALARM_CONTRACT_REVISION,
+                       (uint16_t)(sizeof(values) / sizeof(values[0])),
+                       values));
+  CHECK(values[0] == BOARD_A_ALARM_INPUT_CONTRACT_REVISION);
+  CHECK(values[1] == BOARD_A_ALARM_WARNING);
+  CHECK(values[2] == BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH);
+  CHECK(values[3] == 0x000BU);
+  CHECK(values[4] == BOARD_A_ALARM_PHASE_C);
+  CHECK(values[5] == 1U);
+  CHECK(values[6] == 160U);
+  CHECK(values[7] == 880U);
+  CHECK(values[8] == BOARD_A_ALARM_PHASE_A);
+  CHECK(values[9] == 880U);
+  CHECK(values[10] == (uint16_t)-160);
+  CHECK(values[11] == 750U);
+  CHECK(values[12] == BOARD_A_QUALITY_OK);
+  CHECK(values[13] == BOARD_A_QUALITY_STALE);
+  CHECK(values[14] == BOARD_A_QUALITY_CRC_ERROR);
+  CHECK(((uint32_t)values[15] << 16U | values[16]) == 0x01020304U);
+  CHECK(((uint32_t)values[17] << 16U | values[18]) == 0x11223344U);
+  CHECK(((uint32_t)values[19] << 16U | values[20]) == 0x05060708U);
+  CHECK(((uint32_t)values[21] << 16U | values[22]) == 0x11111111U);
+  CHECK(((uint32_t)values[23] << 16U | values[24]) == 0x22222222U);
+  CHECK(((uint32_t)values[25] << 16U | values[26]) == 0x33333333U);
+  CHECK(((uint32_t)values[27] << 16U | values[28]) == 0x44444444U);
+
+  state.acknowledged = true;
+  board_a_model_publish_alarm_state(&slave.model, &state);
+  board_a_model_set_alarm_buzzer_active(&slave.model, false);
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_ALARM_FLAGS) == 0x0007U);
+
+  request_length = make_read_request(
+      request, BOARD_A_SLAVE_ADDRESS, 0x04U,
+      BOARD_A_INPUT_ALARM_CONTRACT_REVISION,
+      (uint16_t)(sizeof(values) / sizeof(values[0])) + 1U);
+  CHECK(expect_exception(&slave, request, request_length, 0x02U));
+  request_length = make_read_request(
+      request, BOARD_A_SLAVE_ADDRESS, 0x04U,
+      BOARD_A_INPUT_ALARM_SENSOR_FAULT_COUNT_LO + 1U, 1U);
+  CHECK(expect_exception(&slave, request, request_length, 0x02U));
+
+  /* Defined adjacent blocks remain readable as one contiguous range. */
+  CHECK(read_registers(&slave, 0x04U,
+                       BOARD_A_INPUT_DS18B20_ROM_SHORT_2, 2U, values));
+  CHECK(values[1] == BOARD_A_ALARM_INPUT_CONTRACT_REVISION);
+}
+
+static void test_alarm_config_contract(void)
+{
+  board_a_slave_t slave;
+  board_a_alarm_config_t copied_config;
+  uint16_t values[16];
+  uint16_t delta[3] = {96U, 176U, 256U};
+  uint16_t invalid[3] = {500U, 100U, 200U};
+  uint16_t crossing[2] = {1U, 0U};
+  uint8_t request[64];
+  size_t request_length;
+
+  board_a_slave_init(&slave, 0x0000000FU);
+  CHECK(read_registers(&slave, 0x03U,
+                       BOARD_A_HOLDING_ALARM_CONFIG_REVISION, 16U, values));
+  CHECK(values[0] == BOARD_A_ALARM_CONFIG_CONTRACT_REVISION);
+  CHECK(values[1] == 800U);
+  CHECK(values[2] == 880U);
+  CHECK(values[3] == 1200U);
+  CHECK(values[4] == 80U);
+  CHECK(values[5] == 160U);
+  CHECK(values[6] == 240U);
+  CHECK(values[7] == 80U);
+  CHECK(values[8] == 160U);
+  CHECK(values[9] == 320U);
+  CHECK(values[10] == 3U);
+  CHECK(values[11] == 5U);
+  CHECK(values[12] == 32U);
+  CHECK(values[13] == 1U);
+  CHECK(values[14] == 0U);
+  CHECK(values[15] == 0U);
+
+  CHECK(write_multiple(&slave, BOARD_A_HOLDING_ALARM_DELTA_NOTICE,
+                       delta, 3U));
+  CHECK(read_registers(&slave, 0x03U, BOARD_A_HOLDING_ALARM_DELTA_NOTICE,
+                       3U, values));
+  CHECK(values[0] == 96U);
+  CHECK(values[1] == 176U);
+  CHECK(values[2] == 256U);
+
+  request_length = make_write_multiple_request(
+      request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_ALARM_DELTA_NOTICE,
+      invalid, 3U);
+  CHECK(expect_exception(&slave, request, request_length, 0x03U));
+  CHECK(read_registers(&slave, 0x03U, BOARD_A_HOLDING_ALARM_DELTA_NOTICE,
+                       3U, values));
+  CHECK(values[0] == 96U);
+  CHECK(values[1] == 176U);
+  CHECK(values[2] == 256U);
+
+  request_length = make_write_single_request(
+      request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_ALARM_PHASE_WARNING,
+      800U);
+  CHECK(expect_exception(&slave, request, request_length, 0x03U));
+  request_length = make_write_single_request(
+      request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_ALARM_CONFIG_REVISION,
+      1U);
+  CHECK(expect_exception(&slave, request, request_length, 0x02U));
+  request_length = make_write_single_request(
+      request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_ALARM_RESERVED_0, 0U);
+  CHECK(expect_exception(&slave, request, request_length, 0x02U));
+  request_length = make_write_single_request(
+      request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_ALARM_RESERVED_1, 0U);
+  CHECK(expect_exception(&slave, request, request_length, 0x02U));
+  request_length = make_write_multiple_request(
+      request, BOARD_A_SLAVE_ADDRESS, BOARD_A_HOLDING_ALARM_BUZZER_ENABLE,
+      crossing, 2U);
+  CHECK(expect_exception(&slave, request, request_length, 0x02U));
+
+  CHECK(read_one(&slave, 0x03U,
+                 BOARD_A_HOLDING_ALARM_CONFIG_REVISION - 1U) == 0xFFFFU);
+  CHECK(read_one(&slave, 0x03U,
+                 BOARD_A_HOLDING_ALARM_RESERVED_1 + 1U) == 0xFFFFU);
+
+  CHECK(command(&slave, BOARD_A_COMMAND_APPLY_CONFIG));
+  CHECK(slave.model.active_config.alarm_config.delta_notice_x16 == 96);
+  CHECK(slave.model.active_config.alarm_config.delta_warning_x16 == 176);
+  CHECK(slave.model.active_config.alarm_config.delta_critical_x16 == 256);
+  CHECK(board_a_model_copy_alarm_config(&slave.model, &copied_config));
+  CHECK(copied_config.delta_notice_x16 == 96);
+  CHECK(copied_config.delta_warning_x16 == 176);
+  CHECK(copied_config.delta_critical_x16 == 256);
+}
+
+static void test_ack_alarm_command_dedup(void)
+{
+  board_a_slave_t slave;
+  board_a_alarm_state_t state;
+  board_a_alarm_state_t copied;
+  const uint32_t command_id = 0x12345678U;
+
+  board_a_slave_init(&slave, 0x00000010U);
+  memset(&state, 0, sizeof(state));
+  state.valid = true;
+  state.level = BOARD_A_ALARM_CRITICAL;
+  state.reason = BOARD_A_ALARM_REASON_PHASE_TEMPERATURE_HIGH;
+  state.trigger_phase = BOARD_A_ALARM_PHASE_B;
+  state.latched = true;
+  state.buzzer_enable = true;
+  state.event_id = 7U;
+  board_a_model_publish_alarm_state(&slave.model, &state);
+
+  /* The same ID is valid in both command-specific dedup windows. */
+  CHECK(submit_command_with_id(&slave, BOARD_A_COMMAND_SINGLE, command_id));
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_COMMAND_RESULT) ==
+        BOARD_A_COMMAND_RESULT_ACCEPTED);
+  CHECK(submit_command_with_id(&slave, BOARD_A_COMMAND_ACK_ALARM,
+                               command_id));
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_COMMAND_RESULT) ==
+        BOARD_A_COMMAND_RESULT_ACCEPTED);
+  CHECK(board_a_model_take_alarm_ack_request(&slave.model));
+  CHECK(!board_a_model_take_alarm_ack_request(&slave.model));
+
+  CHECK(board_a_model_copy_alarm_state(&slave.model, &copied));
+  CHECK(copied.valid);
+  CHECK(copied.level == BOARD_A_ALARM_CRITICAL);
+  CHECK(copied.latched);
+  CHECK(!copied.acknowledged);
+  CHECK(copied.event_id == 7U);
+
+  /* A duplicate ACK is deduplicated without setting a new request. */
+  CHECK(submit_command_with_id(&slave, BOARD_A_COMMAND_ACK_ALARM,
+                               command_id));
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_COMMAND_RESULT) ==
+        BOARD_A_COMMAND_RESULT_DUPLICATE);
+  CHECK(!board_a_model_take_alarm_ack_request(&slave.model));
+  CHECK(board_a_model_copy_alarm_state(&slave.model, &copied));
+  CHECK(copied.level == BOARD_A_ALARM_CRITICAL);
+  CHECK(copied.latched);
+  CHECK(!copied.acknowledged);
+
+  /* The reverse direction is independent as well. */
+  CHECK(submit_command_with_id(&slave, BOARD_A_COMMAND_ACK_ALARM, 9U));
+  CHECK(board_a_model_take_alarm_ack_request(&slave.model));
+  CHECK(submit_command_with_id(&slave, BOARD_A_COMMAND_SINGLE, 9U));
+  CHECK(read_one(&slave, 0x04U, BOARD_A_INPUT_COMMAND_RESULT) ==
+        BOARD_A_COMMAND_RESULT_ACCEPTED);
+}
+
+static void test_alarm_result_snapshot(void)
+{
+  board_a_model_t model;
+  board_a_alarm_result_t published;
+  board_a_alarm_result_t copied;
+  board_a_alarm_state_t state;
+
+  board_a_model_init(&model, 7U);
+  memset(&published, 0, sizeof(published));
+  published.event = true;
+  published.event_type = BOARD_A_ALARM_EVENT_RAISED;
+  published.event_id = 9U;
+  published.event_time_ms = 123456U;
+  published.state.valid = true;
+  published.state.level = BOARD_A_ALARM_WARNING;
+  published.state.reason = BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH;
+  published.state.trigger_phase = BOARD_A_ALARM_PHASE_C;
+  published.state.delta_valid = true;
+  published.state.maximum_delta_x16 = 240;
+
+  board_a_model_publish_alarm_result(&model, &published);
+  CHECK(board_a_model_copy_alarm_event(&model, &copied));
+  CHECK(copied.event);
+  CHECK(copied.event_type == BOARD_A_ALARM_EVENT_RAISED);
+  CHECK(copied.event_id == 9U);
+  CHECK(copied.event_time_ms == 123456U);
+  CHECK(copied.state.level == BOARD_A_ALARM_WARNING);
+  CHECK(copied.state.trigger_phase == BOARD_A_ALARM_PHASE_C);
+  CHECK(board_a_model_copy_alarm_state(&model, &state));
+  CHECK(state.level == BOARD_A_ALARM_WARNING);
+  CHECK(state.maximum_delta_x16 == 240);
+}
+
 int main(void)
 {
   test_crc_standard_vector();
@@ -894,6 +1156,10 @@ int main(void)
   test_log_schedule_period_and_32bit_wrap();
   test_commands_and_scheduler();
   test_frame_separation();
+  test_alarm_register_contract();
+  test_alarm_config_contract();
+  test_ack_alarm_command_dedup();
+  test_alarm_result_snapshot();
 
   printf("board_a host tests: %u checks, %u failures\n",
          g_checks, g_failures);

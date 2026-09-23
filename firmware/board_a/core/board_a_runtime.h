@@ -29,6 +29,7 @@ typedef struct {
   uint64_t schedule_deadline_us;
   bool start_pending;
   bool schedule_armed;
+  bool event_stop_flush_pending;
   uint32_t schedule_start_late_us;
   uint32_t schedule_start_count;
   board_a_model_stats_t stats;
@@ -57,6 +58,26 @@ bool board_a_runtime_publish_sensor_map(
 
 bool board_a_runtime_copy_sensor_map(
     board_a_runtime_t *runtime, board_a_sensor_map_t *map);
+
+void board_a_runtime_publish_alarm_state(
+    board_a_runtime_t *runtime, const board_a_alarm_state_t *state);
+
+bool board_a_runtime_copy_alarm_state(
+    board_a_runtime_t *runtime, board_a_alarm_state_t *state);
+
+void board_a_runtime_publish_alarm_result(
+    board_a_runtime_t *runtime, const board_a_alarm_result_t *result);
+
+bool board_a_runtime_copy_alarm_event(
+    board_a_runtime_t *runtime, board_a_alarm_result_t *result);
+
+bool board_a_runtime_copy_alarm_config(
+    board_a_runtime_t *runtime, board_a_alarm_config_t *config);
+
+void board_a_runtime_publish_alarm_buzzer_active(
+    board_a_runtime_t *runtime, bool active);
+
+bool board_a_runtime_take_alarm_ack_request(board_a_runtime_t *runtime);
 
 bool board_a_runtime_request_sensor_map_save(
     board_a_runtime_t *runtime, uint32_t command_id);
@@ -98,6 +119,18 @@ bool board_a_runtime_pop_record(
     board_a_runtime_t *runtime,
     board_a_record_format_record_t *record);
 
+bool board_a_runtime_enqueue_event_record(
+    board_a_runtime_t *runtime,
+    const board_a_event_buffer_record_t *event_record);
+
+/*
+ * Peeks queued event rows and consumes only rows accepted by the schema-4
+ * persistence queue. A full persistence queue leaves the current row in
+ * place for a later retry; malformed rows are explicitly dropped.
+ */
+size_t board_a_runtime_drain_event_records(
+    board_a_runtime_t *runtime, board_a_event_buffer_t *event_buffer);
+
 void board_a_runtime_requeue_record(
     board_a_runtime_t *runtime,
     const board_a_record_format_record_t *record);
@@ -117,6 +150,23 @@ void board_a_runtime_note_storage_error(
 
 void board_a_runtime_complete_drain(board_a_runtime_t *runtime,
                                     uint32_t generation, int success);
+
+bool board_a_runtime_complete_event_stop_flush(board_a_runtime_t *runtime);
+
+bool board_a_runtime_copy_event_marker(
+    board_a_runtime_t *runtime, bool *open, uint32_t *event_id,
+    uint64_t *event_start_us);
+
+void board_a_runtime_set_event_marker(
+    board_a_runtime_t *runtime, bool open, uint32_t event_id,
+    uint64_t event_start_us);
+
+bool board_a_runtime_event_marker_dirty(board_a_runtime_t *runtime);
+
+bool board_a_runtime_request_event_marker_save(
+    board_a_runtime_t *runtime, uint32_t command_id);
+
+bool board_a_runtime_recover_incomplete_event(board_a_runtime_t *runtime);
 
 bool board_a_runtime_persistence_status(
     board_a_runtime_t *runtime, board_a_persistence_status_t *status);

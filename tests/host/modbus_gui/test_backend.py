@@ -43,6 +43,7 @@ class FakeService:
         self.calls: list[tuple[object, ...]] = []
         if not temperature_method:
             self.read_temperature_snapshot = None
+            self.read_thermal_state = None
 
     def identity(self) -> dict[str, object]:
         self.calls.append(("identity",))
@@ -71,6 +72,102 @@ class FakeService:
             "sample_id": 9,
             "source": "REAL_DS18B20",
             "sensors": [],
+        }
+
+    def read_thermal_state(self) -> dict[str, object]:
+        self.calls.append(("read_thermal_state",))
+        return {
+            "sample_id": 9,
+            "temperature_snapshot": {
+                "sample_id": 9,
+                "source": "REAL_DS18B20",
+                "sensors": [],
+            },
+            "thermal_alarm": {
+                "contract_revision": 1,
+                "valid": True,
+                "level": "NOTICE",
+                "reason": "PHASE_DELTA_HIGH",
+                "flags": {
+                    "valid": True,
+                    "latched": True,
+                    "acknowledged": False,
+                    "buzzer_active": True,
+                },
+                "trigger_phase": "A",
+                "delta_valid": True,
+                "maximum_delta_x16": 160,
+                "hottest_temperature_x16": 480,
+                "hottest_phase": "A",
+                "phases": [
+                    {
+                        "phase": "A",
+                        "temperature_x16": 480,
+                        "quality": "OK",
+                    },
+                    {
+                        "phase": "B",
+                        "temperature_x16": 320,
+                        "quality": "OK",
+                    },
+                    {
+                        "phase": "C",
+                        "temperature_x16": 320,
+                        "quality": "OK",
+                    },
+                ],
+                "event_id": 3,
+                "alarm_sample_id": 9,
+                "duration_sec": 4,
+                "notice_count": 1,
+                "warning_count": 0,
+                "critical_count": 0,
+                "sensor_fault_count": 0,
+            },
+        }
+
+    def read_thermal_alarm(self) -> dict[str, object]:
+        self.calls.append(("read_thermal_alarm",))
+        return {
+            "contract_revision": 1,
+            "valid": True,
+            "level": "NOTICE",
+            "reason": "PHASE_DELTA_HIGH",
+            "flags": {
+                "valid": True,
+                "latched": True,
+                "acknowledged": False,
+                "buzzer_active": True,
+            },
+            "trigger_phase": "A",
+            "delta_valid": True,
+            "maximum_delta_x16": 160,
+            "hottest_temperature_x16": 480,
+            "hottest_phase": "A",
+            "phases": [
+                {"phase": "A", "temperature_x16": 480, "quality": "OK"},
+                {"phase": "B", "temperature_x16": 320, "quality": "OK"},
+                {"phase": "C", "temperature_x16": 320, "quality": "OK"},
+            ],
+            "event_id": 3,
+            "alarm_sample_id": 9,
+            "duration_sec": 4,
+            "notice_count": 1,
+            "warning_count": 0,
+            "critical_count": 0,
+            "sensor_fault_count": 0,
+        }
+
+    def ack_alarm(self) -> dict[str, object]:
+        self.calls.append(("ack_alarm",))
+        alarm = self.read_thermal_alarm()
+        alarm["flags"]["acknowledged"] = True
+        alarm["acknowledged"] = True
+        return {
+            "duplicate": False,
+            "command_id": 7,
+            "thermal_alarm": alarm,
+            "acknowledged": True,
         }
 
     def config(self, period: int, mask: int, count: int) -> dict[str, object]:
@@ -149,19 +246,37 @@ class BackendTests(unittest.TestCase):
         singled = backend.single_sample(42)
 
         self.assertEqual(polled["temperature_snapshot"]["sample_id"], 9)
+        self.assertEqual(polled["thermal_alarm"]["level"], "NOTICE")
         self.assertEqual(
             polled["temperature_snapshot"]["source"],
             "REAL_DS18B20",
         )
         self.assertEqual(singled["temperature_snapshot"]["sample_id"], 9)
+        self.assertEqual(singled["thermal_alarm"]["level"], "NOTICE")
         self.assertEqual(
             service.calls,
             [
                 ("status",),
-                ("read_temperature_snapshot",),
+                ("read_thermal_state",),
                 ("single", 42),
-                ("read_temperature_snapshot",),
+                ("read_thermal_state",),
             ],
+        )
+        backend.close()
+
+    def test_ack_alarm_delegates_to_service(self) -> None:
+        backend, _transport, _client = self._backend()
+        backend.connect("/dev/fake", 1)
+        service = backend._service
+        service.calls.clear()
+
+        result = backend.ack_alarm()
+
+        self.assertTrue(result["acknowledged"])
+        self.assertEqual(result["thermal_alarm"]["level"], "NOTICE")
+        self.assertEqual(
+            service.calls,
+            [("ack_alarm",), ("read_thermal_alarm",)],
         )
         backend.close()
 

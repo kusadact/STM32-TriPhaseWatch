@@ -19,6 +19,7 @@ from tools.modbus_client.errors import (
 from .backend import GuiBackend
 from .model import (
     AcquisitionPhase,
+    AlarmSnapshot,
     ConnectionState,
     GuiState,
     SnapshotFormatError,
@@ -84,6 +85,7 @@ class GuiController:
         self.state.device_status = None
         self.state.snapshot = None
         self.state.statistics = type(self.state.statistics)()
+        self.state.alarm = None
         self.state.storage = None
         self.state.completed_count = 0
         self.state.failed_count = 0
@@ -168,6 +170,19 @@ class GuiController:
             return False
         command_id = self._new_command_id()
         return self._submit("single_sample", command_id)
+
+    def ack_alarm(self) -> bool:
+        if (
+            self.state.is_busy
+            or self._closing
+            or self.state.connection is not ConnectionState.CONNECTED
+            or self.state.alarm is None
+            or not self.state.alarm.active
+            or self.state.alarm.acknowledged
+        ):
+            return False
+        self.state.last_note = "正在确认热告警"
+        return self._submit("ack_alarm")
 
     def tick(self, now: float | None = None) -> bool:
         if self._closing or self.state.is_busy:
@@ -263,6 +278,8 @@ class GuiController:
             self._handle_stop(value)
         elif operation == "single_sample":
             self._handle_single(value)
+        elif operation == "ack_alarm":
+            self._handle_ack_alarm(value)
 
     def _handle_connect(self, value: Mapping[str, Any]) -> None:
         identity = value.get("identity")
@@ -287,6 +304,7 @@ class GuiController:
         self.state.session_open = False
         self.state.identity = None
         self.state.device_status = None
+        self.state.alarm = None
         self.state.last_note = "已断开"
         self._next_poll_at = None
         self._next_storage_at = None
@@ -305,6 +323,23 @@ class GuiController:
             )
             self.state.set_snapshot(snapshot)
             self.state.completed_count += 1
+
+        alarm_payload = value.get("thermal_alarm")
+        if alarm_payload is None:
+            alarm_payload = value.get("alarm")
+        if alarm_payload is not None:
+            self.state.set_alarm(
+                AlarmSnapshot.from_payload(
+                    alarm_payload,
+                    received_at=self._wall_clock(),
+                )
+            )
+
+        alarm_error = value.get("alarm_error")
+        if isinstance(alarm_error, Mapping) and alarm_error.get(
+            "interface_unavailable"
+        ):
+            self.state.set_alarm_interface_unavailable()
 
         sensor_error = value.get("sensor_error")
         if isinstance(sensor_error, Mapping):
@@ -359,12 +394,41 @@ class GuiController:
             self.state.set_snapshot(snapshot)
             self.state.completed_count += 1
             self.state.last_note = "单次采样完成"
+        alarm_payload = value.get("thermal_alarm")
+        if alarm_payload is None:
+            alarm_payload = value.get("alarm")
+        if alarm_payload is not None:
+            self.state.set_alarm(
+                AlarmSnapshot.from_payload(
+                    alarm_payload,
+                    received_at=self._wall_clock(),
+                )
+            )
         sensor_error = value.get("sensor_error")
         if isinstance(sensor_error, Mapping):
             self.state.last_note = (
                 "单次命令已接受；"
                 + str(sensor_error.get("message", "温度接口未冻结"))
             )
+
+    def _handle_ack_alarm(self, value: Mapping[str, Any]) -> None:
+        alarm_payload = value.get("thermal_alarm")
+        if alarm_payload is None:
+            alarm_payload = value.get("alarm")
+        if not isinstance(alarm_payload, Mapping):
+            raise ProtocolError("ACK_ALARM response is missing thermal_alarm")
+        self.state.set_alarm(
+            AlarmSnapshot.from_payload(
+                alarm_payload,
+                received_at=self._wall_clock(),
+            )
+        )
+        if self.state.alarm is None or not self.state.alarm.acknowledged:
+            raise StateError(
+                "ACK_ALARM was accepted but acknowledgement was not observed",
+                write_acknowledged=True,
+            )
+        self.state.last_note = "热告警已确认，实际告警状态保持不变"
 
     def _handle_failure(self, operation: str, error: Exception) -> None:
         self._record_error(error)
@@ -382,7 +446,12 @@ class GuiController:
             self._next_poll_at = None
             self._next_storage_at = None
             return
-        if operation in {"poll", "refresh_storage", "single_sample"}:
+        if operation in {
+            "poll",
+            "refresh_storage",
+            "single_sample",
+            "ack_alarm",
+        }:
             state = _connection_state_for_error(error)
             if state is not ConnectionState.CONNECTED:
                 self.state.connection = state
@@ -392,6 +461,8 @@ class GuiController:
                 self._next_poll_at = self._clock() + self._poll_interval
             elif operation == "refresh_storage":
                 self._next_storage_at = self._clock() + self._storage_interval
+            elif operation == "ack_alarm":
+                self.state.last_note = "热告警确认失败，实际告警状态未改变"
             return
         if operation == "start_periodic":
             connection = _connection_state_for_error(error)

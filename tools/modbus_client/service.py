@@ -22,6 +22,8 @@ from .protocol import (
 )
 from .registers import (
     command_result_name,
+    decode_thermal_alarm,
+    decode_thermal_alarm_config,
     decode_command_observation,
     decode_ds18b20_snapshot,
     decode_identity,
@@ -30,6 +32,13 @@ from .registers import (
     decode_stats,
     decode_status,
     decode_time_status,
+    THERMAL_ALARM_CONFIG_COUNT,
+    THERMAL_ALARM_CONFIG_START,
+    THERMAL_ALARM_CONTRACT_REVISION,
+    THERMAL_ALARM_INPUT_COUNT,
+    THERMAL_ALARM_INPUT_START,
+    THERMAL_STATE_INPUT_COUNT,
+    THERMAL_STATE_INPUT_START,
 )
 from .timeparse import split_u32
 
@@ -40,6 +49,7 @@ COMMAND_STOP = 4
 COMMAND_SINGLE = 5
 COMMAND_SET_TIME = 6
 COMMAND_ARM_START = 7
+COMMAND_ACK_ALARM = 8
 
 HOLDING_CONFIG_START = 0x0000
 HOLDING_PENDING_UTC_START = 0x0020
@@ -59,6 +69,12 @@ INPUT_PERSISTENCE_STATUS_START = 0x0080
 INPUT_PERSISTENCE_STATUS_COUNT = 48
 INPUT_DS18B20_START = 0x00B0
 INPUT_DS18B20_COUNT = 24
+INPUT_THERMAL_STATE_START = THERMAL_STATE_INPUT_START
+INPUT_THERMAL_STATE_COUNT = THERMAL_STATE_INPUT_COUNT
+INPUT_THERMAL_ALARM_START = THERMAL_ALARM_INPUT_START
+INPUT_THERMAL_ALARM_COUNT = THERMAL_ALARM_INPUT_COUNT
+HOLDING_ALARM_CONFIG_START = THERMAL_ALARM_CONFIG_START
+HOLDING_ALARM_CONFIG_COUNT = THERMAL_ALARM_CONFIG_COUNT
 PROTOCOL_PERSISTENCE_VERSION = 3
 DS18B20_CONTRACT_REVISION = 2
 DS18B20_SENSOR_TYPE = 2
@@ -128,6 +144,12 @@ class ModbusService:
                 exception_code=exc.exception_code,
             ) from exc
 
+        return self._decode_temperature_snapshot(values)
+
+    def _decode_temperature_snapshot(
+        self,
+        values: tuple[int, ...],
+    ) -> dict[str, Any]:
         decoded = decode_ds18b20_snapshot(values)
         source_code = decoded["source_type"]
         if (
@@ -204,6 +226,150 @@ class ModbusService:
             "valid_mask": decoded["valid_mask"],
             "sensors": sensors,
             "sensor_type_code": decoded["sensor_type_code"],
+        }
+
+    def read_thermal_alarm(self) -> dict[str, Any]:
+        try:
+            values = self.read_input(
+                THERMAL_ALARM_INPUT_START,
+                THERMAL_ALARM_INPUT_COUNT,
+            )
+        except ModbusException as exc:
+            if exc.exception_code != 0x02:
+                raise
+            raise UnsupportedProtocolError(
+                "设备不支持三相热告警扩展块，接口尚未冻结",
+                interface_unavailable=True,
+                start=THERMAL_ALARM_INPUT_START,
+                count=THERMAL_ALARM_INPUT_COUNT,
+                exception_code=exc.exception_code,
+            ) from exc
+        return decode_thermal_alarm(values)
+
+    def read_thermal_state(self) -> dict[str, Any]:
+        """Read the temperature and alarm blocks in one consistent transaction."""
+
+        try:
+            values = self.read_input(
+                THERMAL_STATE_INPUT_START,
+                THERMAL_STATE_INPUT_COUNT,
+            )
+        except ModbusException as exc:
+            if exc.exception_code != 0x02:
+                raise
+            raise UnsupportedProtocolError(
+                "设备不支持三相热状态扩展块，接口尚未冻结",
+                interface_unavailable=True,
+                start=THERMAL_STATE_INPUT_START,
+                count=THERMAL_STATE_INPUT_COUNT,
+                exception_code=exc.exception_code,
+            ) from exc
+
+        temperature_snapshot = self._decode_temperature_snapshot(
+            values[:INPUT_DS18B20_COUNT]
+        )
+        thermal_alarm = decode_thermal_alarm(values[INPUT_DS18B20_COUNT:])
+        self._validate_thermal_state(temperature_snapshot, thermal_alarm)
+        return {
+            "contract_revision": THERMAL_ALARM_CONTRACT_REVISION,
+            "sample_id": temperature_snapshot["sample_id"],
+            "temperature_snapshot": temperature_snapshot,
+            "thermal_alarm": thermal_alarm,
+            "alarm": thermal_alarm,
+        }
+
+    @staticmethod
+    def _validate_thermal_state(
+        temperature_snapshot: dict[str, Any],
+        thermal_alarm: dict[str, Any],
+    ) -> None:
+        if not thermal_alarm["valid"]:
+            return
+        if (
+            temperature_snapshot["sample_id"]
+            != thermal_alarm["alarm_sample_id"]
+        ):
+            raise ProtocolError(
+                "温度与热告警块 sample_id 不一致",
+                temperature_sample_id=temperature_snapshot["sample_id"],
+                alarm_sample_id=thermal_alarm["alarm_sample_id"],
+            )
+        if temperature_snapshot["source_type"] == DS18B20_SOURCE_NONE:
+            raise ProtocolError(
+                "热告警有效但温度源为 NONE",
+                source_type=temperature_snapshot["source_type"],
+            )
+        for sensor, alarm_phase in zip(
+            temperature_snapshot["sensors"],
+            thermal_alarm["phases"],
+        ):
+            if (
+                sensor["quality_code"] != alarm_phase["quality_code"]
+                or sensor["temperature_x16"] != alarm_phase["temperature_x16"]
+            ):
+                raise ProtocolError(
+                    "温度与热告警块的相位数据不一致",
+                    sensor_id=sensor["sensor_id"],
+                    temperature_quality=sensor["quality_code"],
+                    alarm_quality=alarm_phase["quality_code"],
+                    temperature_x16=sensor["temperature_x16"],
+                    alarm_temperature_x16=alarm_phase["temperature_x16"],
+                )
+
+    def read_alarm_config(self) -> dict[str, Any]:
+        try:
+            values = self.read_holding(
+                THERMAL_ALARM_CONFIG_START,
+                THERMAL_ALARM_CONFIG_COUNT,
+            )
+        except ModbusException as exc:
+            if exc.exception_code != 0x02:
+                raise
+            raise UnsupportedProtocolError(
+                "设备不支持三相热告警配置块，接口尚未冻结",
+                interface_unavailable=True,
+                start=THERMAL_ALARM_CONFIG_START,
+                count=THERMAL_ALARM_CONFIG_COUNT,
+                exception_code=exc.exception_code,
+            ) from exc
+        return decode_thermal_alarm_config(values)
+
+    def ack_alarm(self, command_id: int | None = None) -> dict[str, Any]:
+        if command_id is None:
+            command_id = time.monotonic_ns() & 0xFFFFFFFF
+            if command_id == 0:
+                command_id = 1
+        if not 0 <= command_id <= 0xFFFFFFFF:
+            raise ValueError("command_id must be in 0..0xFFFFFFFF")
+
+        self.write_multiple(
+            HOLDING_COMMAND,
+            [
+                COMMAND_ACK_ALARM,
+                (command_id >> 16) & 0xFFFF,
+                command_id & 0xFFFF,
+            ],
+        )
+        observation = self._observe_after_write()
+        self._require_command(
+            observation,
+            COMMAND_ACK_ALARM,
+            (1, 2),
+            command_id,
+        )
+        try:
+            thermal_alarm = self.read_thermal_alarm()
+        except ModbusClientError as exc:
+            exc.details["write_acknowledged"] = True
+            exc.details["observation"] = observation
+            raise
+        return {
+            "duplicate": observation["last_command"]["result"] == "DUPLICATE",
+            "command_id": command_id,
+            "command": observation,
+            "thermal_alarm": thermal_alarm,
+            "alarm": thermal_alarm,
+            "acknowledged": thermal_alarm["acknowledged"],
         }
 
     def stats(self) -> dict[str, Any]:
