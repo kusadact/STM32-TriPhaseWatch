@@ -312,7 +312,7 @@ static void test_sensor_fault_priority_and_ack(void)
   CHECK(result.state.reason == BOARD_A_ALARM_REASON_SENSOR_CRC_ERROR);
   CHECK(result.state.trigger_phase == BOARD_A_ALARM_PHASE_A);
   CHECK(result.state.fault_mask == 0x0001U);
-  CHECK(result.state.delta_valid);
+  CHECK(!result.state.delta_valid);
   CHECK(result.state.maximum_delta_x16 == 0);
   board_a_alarm_ack(&alarm);
   CHECK(alarm.state.acknowledged);
@@ -354,8 +354,8 @@ static void test_all_phase_faults_beat_large_delta(void)
     CHECK(result.state.trigger_phase == expected_phase[fault_phase]);
     CHECK(result.state.fault_mask ==
           (uint16_t)(1U << fault_phase));
-    CHECK(result.state.delta_valid);
-    CHECK(result.state.maximum_delta_x16 == 320);
+    CHECK(!result.state.delta_valid);
+    CHECK(result.state.maximum_delta_x16 == 0);
     CHECK(result.state.display_mask ==
           (uint16_t)(0x0007U & (uint16_t)~(1U << fault_phase)));
   }

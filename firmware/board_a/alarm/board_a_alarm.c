@@ -760,6 +760,15 @@ bool board_a_alarm_update(board_a_alarm_t *alarm,
     next_state.coldest_phase = BOARD_A_ALARM_PHASE_NONE;
     next_state.hottest_temperature_x16 = 0;
   }
+  /*
+   * A fault is published as the authoritative alarm state. Keep the phase
+   * readings for diagnosis, but do not expose a delta that could be mistaken
+   * for a valid temperature-difference alarm.
+   */
+  if (next_state.fault_mask != 0U) {
+    next_state.delta_valid = false;
+    next_state.maximum_delta_x16 = 0;
+  }
 
   alarm->last_sample_id = snapshot->sample_id;
   alarm->last_sample_time_us = snapshot->sample_time_us;
