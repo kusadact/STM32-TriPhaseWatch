@@ -77,6 +77,7 @@ class GuiController:
             self._set_local_error("Modbus 地址必须在 1..247")
             return False
 
+        self.state.clear_temperature_history()
         self.state.port = port
         self.state.address = address
         self.state.connection = ConnectionState.CONNECTING
@@ -300,6 +301,7 @@ class GuiController:
         self._next_storage_at = now + self._storage_interval
 
     def _handle_disconnect(self) -> None:
+        self.state.clear_temperature_history()
         self.state.connection = ConnectionState.DISCONNECTED
         self.state.session_open = False
         self.state.identity = None

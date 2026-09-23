@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import Enum
@@ -15,6 +16,7 @@ SENSOR_LAYOUT = (
     (1, "DS18B20-1", "PG9 / 1-Wire"),
     (2, "DS18B20-2", "PG9 / 1-Wire"),
 )
+TEMPERATURE_HISTORY_LIMIT = 120
 PHASE_CARD_TITLES = (
     "A 相 / DS18B20-0",
     "B 相 / DS18B20-1",
@@ -988,6 +990,11 @@ class GuiState:
     last_error_at: datetime | None = None
     last_note: str | None = None
     busy_operation: str | None = None
+    temperature_history: deque[
+        tuple[float | None, float | None, float | None]
+    ] = field(
+        default_factory=lambda: deque(maxlen=TEMPERATURE_HISTORY_LIMIT)
+    )
 
     @property
     def is_busy(self) -> bool:
@@ -1037,8 +1044,22 @@ class GuiState:
     def set_snapshot(self, snapshot: TemperatureSnapshot) -> None:
         self.snapshot = snapshot
         self.statistics = SensorStatistics.calculate(snapshot)
+        self.temperature_history.append(
+            tuple(
+                (
+                    reading.temperature_x16 / 16.0
+                    if reading.valid
+                    and reading.temperature_x16 is not None
+                    else None
+                )
+                for reading in snapshot.sensors
+            )
+        )
         if snapshot.sample_id is not None:
             self.last_sample_id = snapshot.sample_id
+
+    def clear_temperature_history(self) -> None:
+        self.temperature_history.clear()
 
     def set_alarm(self, alarm: AlarmSnapshot) -> None:
         if (

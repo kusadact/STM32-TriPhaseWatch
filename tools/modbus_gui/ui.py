@@ -19,6 +19,9 @@ from .model import (
 from .ports import list_serial_ports
 
 
+TEMPERATURE_TREND_COLORS = ("#dc2626", "#15803d", "#2563eb")
+
+
 class GuiApplication:
     POLL_INTERVAL_MS = 50
 
@@ -35,6 +38,7 @@ class GuiApplication:
         self._after_id: str | None = None
         self._closing = False
         self._rendered_period = controller.state.period_sec
+        self._trend_signature: tuple[int, object, object] | None = None
 
         self.port_var = tk.StringVar()
         self.address_var = tk.StringVar(value="1")
@@ -112,7 +116,7 @@ class GuiApplication:
         self.root.title("STM32 板 A DS18B20 温度监控")
         self.root.minsize(1040, 820)
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(5, weight=1)
+        self.root.rowconfigure(6, weight=1)
 
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
@@ -123,6 +127,7 @@ class GuiApplication:
 
         self._build_connection_bar()
         self._build_cards()
+        self._build_temperature_trend()
         self._build_alarm_panel()
         self._build_statistics()
         self._build_control_area()
@@ -308,9 +313,31 @@ class GuiApplication:
                 textvariable=self.card_vars[column]["updated_at"],
             ).grid(row=6, column=1, sticky="e", padx=8, pady=(3, 8))
 
+    def _build_temperature_trend(self) -> None:
+        frame = ttk.LabelFrame(self.root, text="三相温度趋势")
+        frame.grid(row=2, column=0, sticky="ew", padx=12, pady=6)
+        frame.columnconfigure(0, weight=1)
+        self.temperature_trend_canvas = tk.Canvas(
+            frame,
+            height=150,
+            background="#ffffff",
+            highlightthickness=0,
+        )
+        self.temperature_trend_canvas.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=8,
+            pady=(7, 8),
+        )
+        self.temperature_trend_canvas.bind(
+            "<Configure>",
+            self._on_temperature_trend_resize,
+        )
+
     def _build_alarm_panel(self) -> None:
         frame = ttk.LabelFrame(self.root, text="三相热告警")
-        frame.grid(row=2, column=0, sticky="ew", padx=12, pady=6)
+        frame.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(3, weight=1)
 
@@ -384,7 +411,7 @@ class GuiApplication:
 
     def _build_statistics(self) -> None:
         frame = ttk.LabelFrame(self.root, text="有效节点统计")
-        frame.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
+        frame.grid(row=4, column=0, sticky="ew", padx=12, pady=6)
         fields = (
             ("温度最小", "minimum_temperature"),
             ("温度最大", "maximum_temperature"),
@@ -420,7 +447,7 @@ class GuiApplication:
 
     def _build_control_area(self) -> None:
         container = ttk.Frame(self.root)
-        container.grid(row=4, column=0, sticky="nsew", padx=12, pady=6)
+        container.grid(row=5, column=0, sticky="nsew", padx=12, pady=6)
         container.columnconfigure(0, weight=1)
         container.columnconfigure(1, weight=1)
 
@@ -567,7 +594,7 @@ class GuiApplication:
 
     def _build_footer(self) -> None:
         frame = ttk.Frame(self.root)
-        frame.grid(row=5, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        frame.grid(row=6, column=0, sticky="nsew", padx=12, pady=(0, 12))
         frame.columnconfigure(0, weight=1)
         ttk.Label(
             frame,
@@ -609,6 +636,167 @@ class GuiApplication:
         self._render()
         self._after_id = self.root.after(self.POLL_INTERVAL_MS, self._tick)
 
+    def _on_temperature_trend_resize(self, _event: tk.Event) -> None:
+        self._trend_signature = None
+        self._draw_temperature_trend()
+
+    def _draw_temperature_trend(self) -> None:
+        canvas = self.temperature_trend_canvas
+        width = max(canvas.winfo_width(), 1)
+        height = max(canvas.winfo_height(), 1)
+        history = self.controller.state.temperature_history
+        signature = (
+            len(history),
+            history[0] if history else None,
+            history[-1] if history else None,
+        )
+        if signature == self._trend_signature:
+            return
+        self._trend_signature = signature
+        canvas.delete("all")
+
+        values = [
+            value
+            for sample in history
+            for value in sample
+            if value is not None
+        ]
+        if not values:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="等待采样",
+                fill="#6b7280",
+                tags=("temperature_trend_empty",),
+            )
+            return
+
+        plot_left = 56
+        plot_right = max(width - 56, plot_left + 1)
+        plot_top = 18
+        plot_bottom = max(height - 24, plot_top + 1)
+
+        legend_x = plot_left
+        for phase_name, color in zip(
+            ("A 相", "B 相", "C 相"),
+            TEMPERATURE_TREND_COLORS,
+        ):
+            canvas.create_text(
+                legend_x,
+                6,
+                text=phase_name,
+                fill=color,
+                anchor="nw",
+                tags=("temperature_trend_legend",),
+            )
+            legend_x += 48
+
+        minimum = min(values)
+        maximum = max(values)
+        if maximum - minimum < 0.01:
+            scale_minimum = minimum - 1.0
+            scale_maximum = maximum + 1.0
+        else:
+            padding = max((maximum - minimum) * 0.1, 0.5)
+            scale_minimum = minimum - padding
+            scale_maximum = maximum + padding
+
+        def y_for(value: float) -> float:
+            fraction = (value - scale_minimum) / (
+                scale_maximum - scale_minimum
+            )
+            return plot_bottom - fraction * (plot_bottom - plot_top)
+
+        maximum_y = y_for(maximum)
+        minimum_y = y_for(minimum)
+        canvas.create_line(
+            plot_left,
+            maximum_y,
+            plot_right,
+            maximum_y,
+            fill="#9ca3af",
+            dash=(4, 3),
+            tags=("temperature_trend_reference",),
+        )
+        canvas.create_line(
+            plot_left,
+            minimum_y,
+            plot_right,
+            minimum_y,
+            fill="#9ca3af",
+            dash=(4, 3),
+            tags=("temperature_trend_reference",),
+        )
+        canvas.create_text(
+            plot_right - 4,
+            max(plot_top + 2, maximum_y - 9),
+            text=f"最高 {maximum:.2f} °C",
+            anchor="ne",
+            fill="#4b5563",
+        )
+        canvas.create_text(
+            plot_left + 4,
+            min(plot_bottom - 2, minimum_y + 9),
+            text=f"最低 {minimum:.2f} °C",
+            anchor="sw",
+            fill="#4b5563",
+        )
+
+        sample_count = len(history)
+
+        def x_for(index: int) -> float:
+            if sample_count <= 1:
+                return (plot_left + plot_right) / 2
+            fraction = index / (sample_count - 1)
+            return plot_left + fraction * (plot_right - plot_left)
+
+        for phase_index, color in enumerate(TEMPERATURE_TREND_COLORS):
+            segment: list[tuple[float, float]] = []
+            for sample_index, sample in enumerate(history):
+                value = sample[phase_index]
+                if value is None:
+                    self._draw_temperature_trend_segment(
+                        phase_index,
+                        color,
+                        segment,
+                    )
+                    segment = []
+                    continue
+                segment.append((x_for(sample_index), y_for(value)))
+            self._draw_temperature_trend_segment(
+                phase_index,
+                color,
+                segment,
+            )
+
+    def _draw_temperature_trend_segment(
+        self,
+        phase_index: int,
+        color: str,
+        segment: list[tuple[float, float]],
+    ) -> None:
+        if not segment:
+            return
+        if len(segment) == 1:
+            coordinates = [*segment[0], *segment[0]]
+        else:
+            coordinates = [
+                coordinate
+                for point in segment
+                for coordinate in point
+            ]
+        self.temperature_trend_canvas.create_line(
+            *coordinates,
+            fill=color,
+            width=2,
+            capstyle=tk.ROUND,
+            joinstyle=tk.ROUND,
+            tags=(
+                "temperature_trend_line",
+                f"temperature_trend_phase_{phase_index}",
+            ),
+        )
+
     def _render(self) -> None:
         state = self.controller.state
         availability = state.availability()
@@ -641,6 +829,7 @@ class GuiApplication:
             values["quality"].set(card.quality_text)
             values["sample_time"].set(card.sample_time_text)
             values["updated_at"].set(card.updated_at_text)
+        self._draw_temperature_trend()
 
         stats = state.statistics
         self.statistics_vars["minimum_temperature"].set(
@@ -781,9 +970,21 @@ class GuiApplication:
         self.root.destroy()
 
 
-def main() -> int:
+def main(*, demo: bool = False) -> int:
     root = tk.Tk()
-    controller = GuiController(ModbusServiceBackend())
-    GuiApplication(root, controller)
+    if demo:
+        from .demo import DEMO_PORT, DemoBackend
+
+        controller = GuiController(DemoBackend())
+        app = GuiApplication(
+            root,
+            controller,
+            port_lister=lambda: [DEMO_PORT],
+        )
+        app.port_var.set(DEMO_PORT)
+        root.after(200, lambda: controller.connect(DEMO_PORT, 1))
+    else:
+        controller = GuiController(ModbusServiceBackend())
+        GuiApplication(root, controller)
     root.mainloop()
     return 0

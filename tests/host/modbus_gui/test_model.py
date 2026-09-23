@@ -15,6 +15,7 @@ from tools.modbus_gui.model import (
     SensorStatistics,
     SnapshotFormatError,
     StorageSnapshot,
+    TEMPERATURE_HISTORY_LIMIT,
     TemperatureSnapshot,
 )
 
@@ -159,6 +160,95 @@ class ModelTests(unittest.TestCase):
         state.set_alarm(later)
 
         self.assertEqual(state.alarm.event_time, event_time)
+
+    def test_temperature_history_appends_celsius_samples(self) -> None:
+        state = GuiState()
+        state.set_snapshot(
+            TemperatureSnapshot.from_payload(
+                {
+                    "sample_id": 1,
+                    "sensors": [
+                        sensor(0, 320, "OK"),
+                        sensor(1, 400, "OK"),
+                        sensor(2, 480, "OK"),
+                    ],
+                }
+            )
+        )
+
+        self.assertEqual(
+            tuple(state.temperature_history),
+            ((20.0, 25.0, 30.0),),
+        )
+
+    def test_temperature_history_keeps_only_configured_limit(self) -> None:
+        state = GuiState()
+        for index in range(TEMPERATURE_HISTORY_LIMIT + 5):
+            state.set_snapshot(
+                TemperatureSnapshot.from_payload(
+                    {
+                        "sample_id": index,
+                        "sensors": [
+                            sensor(0, 320 + index, "OK"),
+                            sensor(1, 336 + index, "OK"),
+                            sensor(2, 352 + index, "OK"),
+                        ],
+                    }
+                )
+            )
+
+        self.assertEqual(
+            len(state.temperature_history),
+            TEMPERATURE_HISTORY_LIMIT,
+        )
+        self.assertEqual(
+            state.temperature_history[0],
+            ((320 + 5) / 16.0, (336 + 5) / 16.0, (352 + 5) / 16.0),
+        )
+        self.assertEqual(
+            state.temperature_history[-1],
+            (
+                (320 + TEMPERATURE_HISTORY_LIMIT + 4) / 16.0,
+                (336 + TEMPERATURE_HISTORY_LIMIT + 4) / 16.0,
+                (352 + TEMPERATURE_HISTORY_LIMIT + 4) / 16.0,
+            ),
+        )
+
+    def test_temperature_history_clears_on_session_reset(self) -> None:
+        state = GuiState()
+        state.set_snapshot(
+            TemperatureSnapshot.from_payload(
+                {
+                    "sample_id": 1,
+                    "sensors": [sensor(0, 320, "OK")],
+                }
+            )
+        )
+        self.assertTrue(state.temperature_history)
+
+        state.clear_temperature_history()
+
+        self.assertEqual(tuple(state.temperature_history), ())
+
+    def test_temperature_history_stores_invalid_values_as_none(self) -> None:
+        state = GuiState()
+        state.set_snapshot(
+            TemperatureSnapshot.from_payload(
+                {
+                    "sample_id": 1,
+                    "sensors": [
+                        sensor(0, 320, "OK"),
+                        sensor(1, 0, "CRC_ERROR"),
+                        sensor(2, 0, "NOT_PRESENT"),
+                    ],
+                }
+            )
+        )
+
+        self.assertEqual(
+            state.temperature_history[-1],
+            (20.0, None, None),
+        )
 
     def test_three_valid_sensors_drive_cards_and_statistics(self) -> None:
         received = datetime(2026, 9, 22, 10, 11, 12)
