@@ -432,6 +432,7 @@ class ControllerTests(ControllerTestCase):
             "generated": 40,
             "synced": 31,
             "dropped": 2,
+            "event_dropped": 3,
             "uncertain": 1,
             "queued": 8,
             "in_flight": 1,
@@ -448,6 +449,7 @@ class ControllerTests(ControllerTestCase):
         self.assertEqual(storage.text("generated"), "40")
         self.assertEqual(storage.text("synced"), "31")
         self.assertEqual(storage.text("dropped"), "2")
+        self.assertEqual(storage.text("event_dropped"), "3")
         self.assertEqual(storage.text("uncertain"), "1")
         self.assertEqual(storage.text("queued"), "8")
         self.assertEqual(storage.text("in_flight"), "1")

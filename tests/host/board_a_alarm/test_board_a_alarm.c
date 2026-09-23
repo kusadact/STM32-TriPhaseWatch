@@ -319,6 +319,119 @@ static void test_sensor_fault_priority_and_ack(void)
   CHECK(alarm.state.level == BOARD_A_ALARM_SENSOR_FAULT);
 }
 
+static void test_all_phase_faults_beat_large_delta(void)
+{
+  static const board_a_alarm_phase_t expected_phase[3] = {
+    BOARD_A_ALARM_PHASE_A,
+    BOARD_A_ALARM_PHASE_B,
+    BOARD_A_ALARM_PHASE_C
+  };
+  uint8_t fault_phase;
+
+  for (fault_phase = 0U; fault_phase < 3U; ++fault_phase) {
+    board_a_alarm_t alarm;
+    board_a_sensor_snapshot_t snapshot;
+    board_a_alarm_result_t result;
+    uint8_t phase;
+    bool heated = false;
+
+    board_a_alarm_init(&alarm);
+    snapshot_init(&snapshot, 1U, 0U);
+    for (phase = 0U; phase < 3U; ++phase) {
+      if (phase == fault_phase) {
+        snapshot_set_phase(
+            &snapshot, phase, 0, BOARD_A_QUALITY_CRC_ERROR, false);
+      } else {
+        snapshot_set_phase(
+            &snapshot, phase, heated ? 400 : 720,
+            BOARD_A_QUALITY_OK, true);
+        heated = true;
+      }
+    }
+    CHECK(board_a_alarm_update(&alarm, &snapshot, &result));
+    CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
+    CHECK(result.state.reason == BOARD_A_ALARM_REASON_SENSOR_CRC_ERROR);
+    CHECK(result.state.trigger_phase == expected_phase[fault_phase]);
+    CHECK(result.state.fault_mask ==
+          (uint16_t)(1U << fault_phase));
+    CHECK(result.state.delta_valid);
+    CHECK(result.state.maximum_delta_x16 == 320);
+    CHECK(result.state.display_mask ==
+          (uint16_t)(0x0007U & (uint16_t)~(1U << fault_phase)));
+  }
+}
+
+static void test_configured_clear_samples_and_reevaluation(void)
+{
+  board_a_alarm_t alarm;
+  board_a_sensor_snapshot_t snapshot;
+  board_a_alarm_config_t config;
+  board_a_alarm_result_t result;
+  uint32_t sample_id = 1U;
+  uint64_t time_us = 0U;
+  uint8_t index;
+
+  board_a_alarm_default_config(&config);
+  config.assert_samples = 2U;
+  config.clear_samples = 3U;
+  board_a_alarm_init(&alarm);
+  CHECK(board_a_alarm_set_config(&alarm, &config));
+
+  (void)run_sample(&alarm, sample_id++, time_us, 400, 400, 400);
+  time_us += 100000U;
+  snapshot_init(&snapshot, sample_id++, time_us);
+  snapshot_set_phase(&snapshot, 0U, 0, BOARD_A_QUALITY_CRC_ERROR, false);
+  snapshot_set_phase(&snapshot, 1U, 400, BOARD_A_QUALITY_OK, true);
+  snapshot_set_phase(&snapshot, 2U, 400, BOARD_A_QUALITY_OK, true);
+  CHECK(board_a_alarm_update(&alarm, &snapshot, &result));
+  CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
+  time_us += 100000U;
+
+  for (index = 0U; index < 2U; ++index) {
+    result = run_sample(&alarm, sample_id++, time_us, 400, 400, 400);
+    time_us += 100000U;
+    CHECK(result.state.level == BOARD_A_ALARM_SENSOR_FAULT);
+  }
+  result = run_sample(&alarm, sample_id++, time_us, 400, 400, 400);
+  time_us += 100000U;
+  CHECK(result.state.level == BOARD_A_ALARM_NORMAL);
+
+  result = run_sample(&alarm, sample_id++, time_us, 800, 400, 400);
+  time_us += 100000U;
+  CHECK(result.state.level == BOARD_A_ALARM_NORMAL);
+  result = run_sample(&alarm, sample_id++, time_us, 800, 400, 400);
+  CHECK(result.state.level == BOARD_A_ALARM_CRITICAL);
+  CHECK(result.state.reason == BOARD_A_ALARM_REASON_PHASE_DELTA_HIGH);
+}
+
+static void test_threshold_strictly_above_boundaries(void)
+{
+  board_a_alarm_t alarm;
+  board_a_alarm_result_t result;
+  uint8_t index;
+
+  board_a_alarm_init(&alarm);
+  (void)run_sample(&alarm, 1U, 0U, 400, 400, 400);
+  for (index = 0U; index < 3U; ++index) {
+    result = run_sample(
+        &alarm, (uint32_t)(2U + index), (uint64_t)(index + 1U) * 100000U,
+        576, 400, 400);
+  }
+  CHECK(result.state.level == BOARD_A_ALARM_WARNING);
+  CHECK(result.state.maximum_delta_x16 == 176);
+
+  board_a_alarm_init(&alarm);
+  (void)run_sample(&alarm, 1U, 0U, 400, 400, 400);
+  for (index = 0U; index < 3U; ++index) {
+    result = run_sample(
+        &alarm, (uint32_t)(2U + index), (uint64_t)(index + 1U) * 100000U,
+        1216, 1216, 1216);
+  }
+  CHECK(result.state.level == BOARD_A_ALARM_CRITICAL);
+  CHECK(result.state.reason ==
+        BOARD_A_ALARM_REASON_PHASE_TEMPERATURE_HIGH);
+}
+
 static void test_single_phase_delta_invalid(void)
 {
   board_a_alarm_t alarm;
@@ -441,6 +554,9 @@ int main(void)
   test_hysteresis_and_recovery();
   test_rise_rate_and_window();
   test_sensor_fault_priority_and_ack();
+  test_all_phase_faults_beat_large_delta();
+  test_configured_clear_samples_and_reevaluation();
+  test_threshold_strictly_above_boundaries();
   test_single_phase_delta_invalid();
   test_ack_reset_on_escalation_and_duration();
   test_fault_recovery_and_unknown_reset();

@@ -104,6 +104,23 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(alarm.event_time_text, "2026-09-23 10:00:00")
         self.assertEqual(alarm.color, "#f97316")
 
+    def test_alarm_normal_is_green(self) -> None:
+        alarm = AlarmSnapshot.from_payload(
+            alarm_payload(
+                level="NORMAL",
+                reason="NONE",
+                maximum_delta_x16=0,
+                trigger_phase="NONE",
+                hottest_phase="A",
+                hottest_temperature_x16=400,
+                temperatures=(400, 400, 400),
+            )
+        )
+
+        self.assertEqual(alarm.level, AlarmLevel.NORMAL)
+        self.assertEqual(alarm.reason, AlarmReason.NONE)
+        self.assertEqual(alarm.color, "#15803d")
+
     def test_alarm_snapshot_rejects_fault_delta_and_hides_invalid_temperature(
         self,
     ) -> None:
@@ -342,12 +359,14 @@ class ModelTests(unittest.TestCase):
                 "generated": 40,
                 "synced": 31,
                 "dropped": 0,
+                "event_dropped": 3,
                 "queued": 8,
             }
         )
 
         self.assertEqual(storage.text("generated"), "40")
         self.assertEqual(storage.text("synced"), "31")
+        self.assertEqual(storage.text("event_dropped"), "3")
         self.assertEqual(storage.text("queued"), "8")
         self.assertEqual(storage.text("uncertain"), "--")
 

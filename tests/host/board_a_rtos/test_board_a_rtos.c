@@ -1474,6 +1474,147 @@ static void test_event_marker_recovery(void)
   pthread_mutex_destroy(&context.mutex);
 }
 
+static void test_disconnected_alarm_continuity(void)
+{
+  fake_lock_t context;
+  board_a_runtime_t runtime;
+  board_a_alarm_t alarm;
+  board_a_event_buffer_t event_buffer;
+  board_a_event_buffer_status_t event_status;
+  board_a_sensor_snapshot_t snapshot;
+  board_a_alarm_result_t result;
+  board_a_event_buffer_record_t event_record;
+  uint32_t samples[5] = {1U, 2U, 3U, 4U, 5U};
+  int16_t temperatures[5] = {400, 880, 880, 880, 1216};
+  uint32_t runtime_event_id = 0U;
+  uint32_t runtime_sample_id = 0U;
+  uint16_t runtime_level = 0U;
+  uint8_t index;
+  uint8_t phase;
+
+  p3b_runtime_setup(&runtime, &context, 0x21U);
+  board_a_alarm_init(&alarm);
+  board_a_event_buffer_init(&event_buffer);
+
+  for (index = 0U; index < ARRAY_SIZE(samples); ++index) {
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.sample_id = samples[index];
+    snapshot.sample_time_us = (uint64_t)(index + 1U) * 1000000ULL;
+    snapshot.valid_mask = 0x0007U;
+    for (phase = 0U; phase < BOARD_A_SENSOR_COUNT; ++phase) {
+      snapshot.sensors[phase].sensor_id = phase;
+      snapshot.sensors[phase].sensor_type = BOARD_A_SENSOR_TYPE_DS18B20;
+      if ((index == 4U) && (phase == 0U)) {
+        snapshot.sensors[phase].has_value = false;
+        snapshot.sensors[phase].quality = BOARD_A_QUALITY_CRC_ERROR;
+      } else {
+        snapshot.sensors[phase].has_value = true;
+        snapshot.sensors[phase].quality = BOARD_A_QUALITY_OK;
+        snapshot.sensors[phase].temperature_x16 = temperatures[index];
+      }
+      snapshot.sensors[phase].rom_short = (uint16_t)(0x1200U + phase);
+    }
+    CHECK(board_a_event_buffer_push_snapshot(&event_buffer, &snapshot));
+    CHECK(board_a_alarm_update(&alarm, &snapshot, &result));
+    CHECK(board_a_event_buffer_note_alarm_result(&event_buffer, &result));
+    board_a_runtime_publish_alarm_result(&runtime, &result);
+    /* No runtime poll occurs: this is the communication outage window. */
+  }
+
+  CHECK(alarm.state.level == BOARD_A_ALARM_SENSOR_FAULT);
+  CHECK(alarm.state.reason ==
+        BOARD_A_ALARM_REASON_SENSOR_CRC_ERROR);
+  CHECK(alarm.state.event_id != 0U);
+  CHECK(runtime_read_u32(
+      &runtime, 0x04U, BOARD_A_INPUT_ALARM_EVENT_ID_HI,
+      &runtime_event_id));
+  CHECK(runtime_read_u32(
+      &runtime, 0x04U, BOARD_A_INPUT_ALARM_SAMPLE_ID_HI,
+      &runtime_sample_id));
+  CHECK(runtime_read_u16(
+      &runtime, 0x04U, BOARD_A_INPUT_ALARM_LEVEL, &runtime_level));
+  CHECK(runtime_event_id == alarm.state.event_id);
+  CHECK(runtime_sample_id == alarm.state.sample_id);
+  CHECK(runtime_level == BOARD_A_ALARM_SENSOR_FAULT);
+
+  board_a_event_buffer_status(&event_buffer, &event_status);
+  CHECK(event_status.event_open);
+  CHECK(event_status.event_id == runtime_event_id);
+  CHECK(event_status.queued_records >= 2U);
+  while (board_a_event_buffer_pull_record(&event_buffer, &event_record)) {
+    if (event_record.phase == BOARD_A_EVENT_PHASE_TRIGGER) {
+      CHECK(event_record.event_id == runtime_event_id);
+      break;
+    }
+  }
+
+  pthread_mutex_destroy(&context.mutex);
+}
+
+static void test_restart_rom_thresholds_and_marker(void)
+{
+  static const uint8_t base_rom[8] = {
+    0x28U, 0xFFU, 0x64U, 0x1EU, 0x5BU, 0x16U, 0x03U, 0x75U
+  };
+  fake_lock_t context;
+  board_a_runtime_t runtime;
+  board_a_persisted_config_t config;
+  board_a_persisted_config_t decoded;
+  board_a_sensor_map_t map;
+  board_a_alarm_config_t alarm_config;
+  board_a_record_format_record_t record;
+  uint8_t payload[BOARD_A_CONFIG_PAYLOAD_SIZE];
+  bool marker_open = false;
+  uint32_t marker_id = 0U;
+  uint64_t marker_start_us = 0U;
+  uint8_t index;
+
+  memset(&config, 0, sizeof(config));
+  config.period_sec = 30U;
+  config.channel_mask = 0x0007U;
+  config.record_count = 0U;
+  board_a_alarm_default_config(&config.alarm);
+  config.alarm.phase_notice_x16 = 768;
+  config.alarm.phase_warning_x16 = 800;
+  config.alarm.delta_warning_x16 = 128;
+  config.event_open = true;
+  config.event_id = 77U;
+  config.event_start_us = 5000000ULL;
+  config.sensor_valid_mask = 0x07U;
+  for (index = 0U; index < BOARD_A_SENSOR_COUNT; ++index) {
+    memcpy(config.sensor_roms[index], base_rom, sizeof(base_rom));
+    config.sensor_roms[index][2] = (uint8_t)(0x60U + index);
+    config.sensor_roms[index][7] =
+        ds18b20_crc8(config.sensor_roms[index], 7U);
+  }
+
+  p3b_runtime_setup(&runtime, &context, 0x22U);
+  CHECK(board_a_config_payload_encode(&config, payload, sizeof(payload)));
+  CHECK(board_a_config_payload_decode(payload, sizeof(payload), &decoded));
+  board_a_runtime_apply_loaded_config(&runtime, &decoded, 3U);
+  CHECK(board_a_runtime_copy_sensor_map(&runtime, &map));
+  CHECK(map.valid_mask == 0x07U);
+  CHECK(board_a_runtime_copy_alarm_config(&runtime, &alarm_config));
+  CHECK(alarm_config.phase_notice_x16 == 768);
+  CHECK(alarm_config.phase_warning_x16 == 800);
+  CHECK(alarm_config.delta_warning_x16 == 128);
+  CHECK(board_a_runtime_copy_event_marker(
+      &runtime, &marker_open, &marker_id, &marker_start_us));
+  CHECK(marker_open);
+  CHECK(marker_id == 77U);
+  CHECK(marker_start_us == 5000000ULL);
+
+  CHECK(board_a_runtime_recover_incomplete_event(&runtime));
+  CHECK(board_a_runtime_pop_record(&runtime, &record));
+  CHECK(record.event_id == 77U);
+  CHECK(record.event_phase == BOARD_A_RECORD_EVENT_PHASE_CLOSE);
+  CHECK(record.planned_ms == 5000U);
+  CHECK((record.event_flags & BOARD_A_EVENT_FLAG_INCOMPLETE) != 0U);
+  CHECK((record.event_flags & BOARD_A_EVENT_FLAG_FORCED_CLOSE) != 0U);
+
+  pthread_mutex_destroy(&context.mutex);
+}
+
 int main(void)
 {
   test_monotonic_wrap();
@@ -1496,6 +1637,8 @@ int main(void)
   test_t08_word_encoding_and_boundaries();
   test_alarm_ack_request_take();
   test_event_marker_recovery();
+  test_disconnected_alarm_continuity();
+  test_restart_rom_thresholds_and_marker();
   test_concurrent_snapshot_and_commands();
   test_runtime_event_drain_and_queue_drop();
   test_runtime_stop_flush_gate();

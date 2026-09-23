@@ -564,6 +564,50 @@ static int test_event_utc_precision(void)
   return 0;
 }
 
+static int test_sd_failure_keeps_critical_alarm_visible(void)
+{
+  board_a_model_t model;
+  board_a_alarm_state_t state;
+  uint16_t values[2];
+  uint16_t level;
+  uint16_t storage_error;
+
+  board_a_model_init(&model, 0x56U);
+  memset(&state, 0, sizeof(state));
+  state.valid = true;
+  state.level = BOARD_A_ALARM_CRITICAL;
+  state.reason = BOARD_A_ALARM_REASON_PHASE_TEMPERATURE_HIGH;
+  state.trigger_phase = BOARD_A_ALARM_PHASE_B;
+  state.delta_valid = true;
+  state.maximum_delta_x16 = 320;
+  state.hottest_temperature_x16 = 1216;
+  state.hottest_phase = BOARD_A_ALARM_PHASE_B;
+  state.sample_id = 9U;
+  state.event_id = 4U;
+  state.latched = true;
+  state.buzzer_enable = true;
+  board_a_model_publish_alarm_state(&model, &state);
+
+  board_a_model_set_storage_state(
+      &model, BOARD_A_STORAGE_IO_ERROR, BOARD_A_STORAGE_ERROR_MOUNT, 7U);
+  board_a_persistence_note_event_drop(&model.persistence);
+  board_a_persistence_note_event_drop(&model.persistence);
+
+  CHECK(board_a_model_read_registers(
+      &model, MODBUS_REGISTER_INPUT, BOARD_A_INPUT_ALARM_LEVEL, 1U,
+      &level, 0U) == MODBUS_RESULT_OK);
+  CHECK(level == BOARD_A_ALARM_CRITICAL);
+  CHECK(board_a_model_read_registers(
+      &model, MODBUS_REGISTER_INPUT, BOARD_A_INPUT_EXTENDED_STORAGE_ERROR,
+      1U, &storage_error, 0U) == MODBUS_RESULT_OK);
+  CHECK(storage_error == BOARD_A_STORAGE_ERROR_MOUNT);
+  CHECK(board_a_model_read_registers(
+      &model, MODBUS_REGISTER_INPUT, BOARD_A_INPUT_EVENT_DROPPED_HI, 2U,
+      values, 0U) == MODBUS_RESULT_OK);
+  CHECK((((uint32_t)values[0] << 16U) | values[1]) == 2U);
+  return 0;
+}
+
 int main(void)
 {
   CHECK(test_save_mailbox_capture_and_busy() == 0);
@@ -577,6 +621,7 @@ int main(void)
   CHECK(test_real_ds18b20_not_present_record() == 0);
   CHECK(test_event_record_enqueue_and_drop_accounting() == 0);
   CHECK(test_event_utc_precision() == 0);
+  CHECK(test_sd_failure_keeps_critical_alarm_visible() == 0);
   puts("PASS test_model_persistence");
   return 0;
 }
