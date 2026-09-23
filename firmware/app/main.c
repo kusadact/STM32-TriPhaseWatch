@@ -15,15 +15,15 @@ int main(void)
   LED_Init();
 
   printf("\r\n");
-  printf("[water-monitor] blank firmware, build %s %s\r\n",
+  printf("[triphase] blank firmware, build %s %s\r\n",
          __DATE__, __TIME__);
-  printf("[water-monitor] SYSCLK=%lu Hz, HSE=%lu Hz\r\n",
+  printf("[triphase] SYSCLK=%lu Hz, HSE=%lu Hz\r\n",
          (unsigned long)SystemCoreClock, (unsigned long)HSE_VALUE);
-  printf("[water-monitor] P0 baseline: RS485 bridge and Modbus not implemented\r\n");
+  printf("[triphase] P0 baseline: RS485 bridge and Modbus not implemented\r\n");
 
   while (1) {
     LED0 = 0U; /* DS0 red LED on (active low). */
-    printf("[water-monitor] alive %lu\r\n", (unsigned long)tick);
+    printf("[triphase] alive %lu\r\n", (unsigned long)tick);
     delay_ms(500U);
     LED0 = 1U;
     delay_ms(500U);
