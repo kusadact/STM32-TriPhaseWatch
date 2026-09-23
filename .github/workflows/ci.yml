@@ -121,6 +121,10 @@ jobs:
              build/buscomm_sd.map \
              "${stage}/sd-bringup/"
 
+          for dir in board-a board-b bringup sd-bringup; do
+            cp LICENSE NOTICE "${stage}/${dir}/"
+          done
+
           (
             cd "${stage}"
             zip --quiet --recurse-paths "../board-a-v${version}.zip" board-a
