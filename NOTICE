@@ -1,16 +1,35 @@
-STM32F407-WaterQualityMonitor
+STM32-TriPhaseWatch
+Three-phase busbar thermal hotspot early warning on STM32F407
+https://github.com/kusadact/STM32-TriPhaseWatch
 Copyright 2026 kusadact <kspz2@hotmail.com>
+
+Except where noted below, this project is licensed under the Apache License 2.0
+(see LICENSE).
 
 This product includes software developed by third parties:
 
-- STM32F4xx Standard Peripheral Library
+- STM32F4xx Standard Peripheral Library V1.4.0
   Copyright (c) 2014 STMicroelectronics
-  Licensed under MCD-ST Liberty SW License Agreement V2.
+  Licensed under the MCD-ST Liberty SW License Agreement V2. The agreement text
+  ships with the ST firmware library package.
 
-- CMSIS Core (Cortex-M4 core support files)
+- CMSIS Cortex-M4 Core Support Files V3.20
   Copyright (c) 2009-2013 ARM Limited
-  Licensed under the Apache License, Version 2.0.
+  Licensed under the BSD 3-Clause License. Source files retain the license
+  header; redistributions in binary form must reproduce this notice in the
+  accompanying materials.
 
-- ALIENTEK Explorer STM32F4 board support package (BSP)
-  Copyright (c) ALIENTEK (Guangzhou Xingyi Electronic Technology Co., Ltd.)
-  All rights reserved; provided for use with ALIENTEK development boards.
+- FreeRTOS Kernel V9.0.0
+  Copyright (C) 2016 Real Time Engineers Ltd.
+  Licensed under GPLv2 with the FreeRTOS linking exception; full text in
+  firmware/bsp/freertos/LICENSE.txt.
+
+- FatFs R0.10b
+  Copyright (C) 2014 ChaN
+  Free for education, research and commercial use, with no warranty. Source
+  redistributions must retain the copyright notice in firmware/bsp/FATFS/ff.c.
+
+- ALIENTEK Explorer STM32F4 board support package
+  Copyright (C) Guangzhou Xingyi Electronic Technology Co., Ltd. (ALIENTEK),
+  2014-2024. Distributed with the ALIENTEK Explorer STM32F4 development board
+  package; included here for use with the corresponding ALIENTEK hardware.

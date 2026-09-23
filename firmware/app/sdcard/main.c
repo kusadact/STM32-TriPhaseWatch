@@ -105,8 +105,8 @@ int main(void)
   LED_Init();
 
   printf("\r\n");
-  printf("[water-monitor] SD SPI bring-up, build %s %s\r\n", __DATE__, __TIME__);
-  printf("[water-monitor] CS=PC11 MOSI=PD2 MISO=PC8 SCK=PC12\r\n");
+  printf("[triphase] SD SPI bring-up, build %s %s\r\n", __DATE__, __TIME__);
+  printf("[triphase] CS=PC11 MOSI=PD2 MISO=PC8 SCK=PC12\r\n");
 
   while (1) {
     if ((sd_ok == 0u) && (tick_ms >= next_try_ms)) {
