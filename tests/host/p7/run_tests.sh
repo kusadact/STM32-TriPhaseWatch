@@ -19,6 +19,7 @@ run_step "$ROOT_DIR/tests/host/board_a_rtos/run_tests.sh"
 run_step "$ROOT_DIR/tests/host/eeprom/run_tests.sh"
 run_step "$ROOT_DIR/tests/host/mac_cli/run_tests.sh"
 run_step "$ROOT_DIR/tests/host/modbus_gui/run_tests.sh"
+run_step python3 -m unittest discover -s "$ROOT_DIR/tests/host/persistence_verifier" -v
 run_step "$ROOT_DIR/firmware/build/build_board_a.sh"
 run_step "$ROOT_DIR/firmware/build/build_board_b.sh"
 run_step python3 -m compileall -q "$ROOT_DIR/tools" "$ROOT_DIR/tests/host"
